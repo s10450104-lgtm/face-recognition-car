@@ -1,0 +1,20 @@
+# 人臉辨識系統相依套件
+#
+# 安裝：
+#   pip install -r requirements.txt
+#
+# 注意：opencv-contrib-python 必須安裝，LBPH 辨識器在這個套件裡面。
+
+opencv-python>=4.5
+opencv-contrib-python>=4.5
+numpy>=1.21
+
+# Web 介面（app.py 需要）
+Flask>=3.0
+
+# ── 樹莓派專用（車子上才需要）──
+# Picamera2 需要用 apt 安裝，不是 pip：
+#   sudo apt install python3-picamera2
+# 真實馬達控制另外需要：
+#   sudo apt install python3-smbus i2c-tools
+#   pip install adafruit-circuitpython-pca9685 gpiozero

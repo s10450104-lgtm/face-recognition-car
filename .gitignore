@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 訓練資料與模型
+# 這些是每位同學自己收集的，體積大且含個人影像，
+# 建議不要提交到 Git（老師要求上傳專案時可只傳程式碼）
+data/
+models/
+
+# 執行產物
+logs/
+*.yml
+*.json
+!package.json
+
+# 車端專用
+LOBOROBOT2.py
+yolo_model.pt

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEURA-LINK // AI 自走車遙控暨人臉辨識</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Noto+Sans+TC:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div class="scanlines"></div>
+<div class="grid-bg"></div>
+
+<header class="top-bar">
+  <div class="brand">
+    <div class="brand-mark">◈</div>
+    <div class="brand-text">
+      <h1>NEURA-LINK</h1>
+      <span class="sub">AI CAR CONTROL &amp; FACE RECOGNITION SYSTEM</span>
+    </div>
+  </div>
+  <div class="sys-status">
+    <div class="status-item">
+      <span class="label">MODE</span>
+      <span class="value mode-{{ mode }}">{{ 'SIMULATION' if mode == 'simulation' else 'RPI HARDWARE' }}</span>
+    </div>
+    <div class="status-item">
+      <span class="label">FPS</span>
+      <span class="value" id="fps">--</span>
+    </div>
+    <div class="status-item">
+      <span class="label">UPLINK</span>
+      <span class="value" id="uplink"><span class="dot"></span>STANDBY</span>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ══════════ 影像串流 ══════════ -->
+  <section class="panel panel-video">
+    <div class="panel-head">
+      <span class="panel-title">◉ LIVE FEED</span>
+      <span class="panel-badge" id="rec-badge">REC</span>
+    </div>
+    <div class="video-wrap">
+      <img id="video" src="/video_feed" alt="即時影像串流">
+      <div class="scan-overlay"></div>
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+      <div class="face-tag" id="face-tag">NO FACE DETECTED</div>
+    </div>
+    <div class="video-meta">
+      <div class="meta-box">
+        <span class="meta-label">已註冊人數</span>
+        <span class="meta-value" id="registered-count">0</span>
+      </div>
+      <div class="meta-box">
+        <span class="meta-label">畫面中臉孔</span>
+        <span class="meta-value" id="face-count">0</span>
+      </div>
+      <div class="meta-box">
+        <span class="meta-label">辨識成功</span>
+        <span class="meta-value accent" id="known-count">0</span>
+      </div>
+      <div class="meta-box">
+        <span class="meta-label">閾值</span>
+        <span class="meta-value small" id="threshold">60 / 85</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ 遙控 ══════════ -->
+  <section class="panel panel-control">
+    <div class="panel-head">
+      <span class="panel-title">◈ DRIVE CONTROL</span>
+      <span class="panel-badge warn" id="mode-note">SIM</span>
+    </div>
+
+    <div class="speed-block">
+      <div class="speed-head">
+        <span>THROTTLE</span>
+        <span class="speed-val" id="speed-val">50%</span>
+      </div>
+      <input type="range" id="speed" min="0" max="100" value="50" class="speed-slider">
+      <div class="speed-ticks"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>
+    </div>
+
+    <div class="dpad">
+      <button class="dbtn dbtn-diag" data-action="forward_left" title="前左轉">◤</button>
+      <button class="dbtn dbtn-up"    data-action="forward"       title="前進">▲</button>
+      <button class="dbtn dbtn-diag" data-action="forward_right" title="前右轉">◥</button>
+
+      <button class="dbtn dbtn-left"  data-action="left"  title="左轉">◀</button>
+      <div class="dpad-core">
+        <span class="core-label" id="motor-action">STOP</span>
+        <span class="core-sub" id="motor-wheels">L 0 · R 0</span>
+      </div>
+      <button class="dbtn dbtn-right" data-action="right" title="右轉">▶</button>
+
+      <button class="dbtn dbtn-diag" data-action="backward_left"  title="後左轉">◣</button>
+      <button class="dbtn dbtn-down"  data-action="backward"       title="後退">▼</button>
+      <button class="dbtn dbtn-diag" data-action="backward_right" title="後右轉">◢</button>
+    </div>
+
+    <div class="control-actions">
+      <button class="btn btn-stop" data-action="stop">■ STOP 停止</button>
+      <button class="btn btn-emergency" id="btn-emergency">⚠ EMERGENCY 緊急停止</button>
+    </div>
+
+    <div class="servo-block">
+      <div class="servo-title">CAMERA GIMBAL</div>
+      <div class="servo-row">
+        <span class="servo-label">X</span>
+        <input type="range" id="servo-x" min="0" max="180" value="90" class="servo-slider">
+        <span class="servo-val" id="servo-x-val">90°</span>
+      </div>
+      <div class="servo-row">
+        <span class="servo-label">Y</span>
+        <input type="range" id="servo-y" min="0" max="180" value="90" class="servo-slider">
+        <span class="servo-val" id="servo-y-val">90°</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ 人臉註冊 ══════════ -->
+  <section class="panel panel-register">
+    <div class="panel-head">
+      <span class="panel-title">◈ FACE REGISTRY</span>
+      <span class="panel-badge" id="reg-badge">IDLE</span>
+    </div>
+
+    <div class="reg-form">
+      <label class="field">
+        <span class="field-label">IDENTITY / 名稱</span>
+        <input type="text" id="reg-label" placeholder="例：student01 或 王小明" maxlength="40">
+      </label>
+      <label class="field field-narrow">
+        <span class="field-label">張數</span>
+        <input type="number" id="reg-count" value="30" min="5" max="200">
+      </label>
+    </div>
+
+    <div class="reg-progress hidden" id="reg-progress">
+      <div class="progress-head">
+        <span id="reg-name">—</span>
+        <span id="reg-count-text">0 / 30</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="reg-fill"></div></div>
+      <p class="reg-hint">請看著鏡頭，稍微左右轉頭並改變表情</p>
+    </div>
+
+    <div class="reg-actions">
+      <button class="btn btn-primary" id="btn-register">開始註冊</button>
+      <button class="btn btn-ghost hidden" id="btn-cancel-reg">取消</button>
+      <button class="btn btn-accent" id="btn-train">重新訓練模型</button>
+      <button class="btn btn-ghost" id="btn-snapshot">存擷截圖</button>
+    </div>
+
+    <div class="people-list">
+      <div class="list-head">
+        <span>REGISTERED IDENTITIES</span>
+        <span id="people-total">0</span>
+      </div>
+      <ul id="people-ul"><li class="empty">尚無註冊資料</li></ul>
+    </div>
+  </section>
+
+  <!-- ══════════ 系統日誌 ══════════ -->
+  <section class="panel panel-log">
+    <div class="panel-head">
+      <span class="panel-title">◈ SYSTEM LOG</span>
+      <button class="btn-clear" id="btn-clear-log">CLEAR</button>
+    </div>
+    <div class="log-body" id="log-body"></div>
+  </section>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
