@@ -28,5 +28,9 @@ logs/
 !package.json
 
 # 車端專用
-LOBOROBOT2.py
+# 註：LOBOROBOT2.py 是課程提供的馬達控制庫，
+# 必須跟 motor_control.py 一起才能在車上運作，所以納入版控。
 yolo_model.pt
+
+# 樹莓派自動下載的 HAAR cascade
+cascades/

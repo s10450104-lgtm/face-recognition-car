@@ -91,11 +91,11 @@ def main() -> int:
     # ── 2. HAAR ──
     section("2. HAAR Cascade 人臉偵測")
     try:
+        cascade_path = fc.find_cascade_file()
         detector = fc.build_face_detector()
         check("載入 haarcascade_frontalface_alt.xml", not detector.empty())
-        check("cascade 路徑存在",
-              (Path(cv2.data.haarcascades) / fc.FACE_DETECTOR_PATH).exists(),
-              f"→ {cv2.data.haarcascades}")
+        check("cascade 檔案存在", cascade_path.exists(),
+              f"→ {cascade_path}")
 
         blank = np.full((480, 640), 128, np.uint8)
         res = fc.detect_faces(blank, detector)

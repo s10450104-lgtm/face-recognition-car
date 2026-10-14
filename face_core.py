@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import sys
+import urllib.request
 
 # ── 必須在 import cv2 之前設定 ──
 # 1) OPENCV_LOG_LEVEL：攝影機開不起來時 cv2 會噴一堆 FFMPEG 錯誤到 stderr，
@@ -67,8 +68,32 @@ DATA_DIR = BASE_DIR / "data"          # 人臉訓練照片
 MODEL_DIR = BASE_DIR / "models"       # LBPH 模型輸出
 LOG_DIR = BASE_DIR / "logs"           # 執行紀錄
 
-# HAAR Cascade：使用 OpenCV 內建檔案（隨套件安裝，不需額外下載）
+# HAAR Cascade 檔案名稱
 FACE_DETECTOR_PATH = "haarcascade_frontalface_alt.xml"
+
+# HAAR Cascade 的搜尋位置（依序找找看）
+#
+# 為什麼需要多個來源？
+#   - Windows 的 opencv-python：cv2.data.haarcascades 有內建檔案
+#   - Raspberry Pi 的 Debian opencv：cv2.data 不存在，檔案放在
+#     /usr/share/opencv4/haarcascades/（由 opencv-data 套件提供，
+#     但預設不一定安裝）
+#   - 專案內的 cascades/ 資料夾：自行管理，最可靠
+#
+# 都找不到時會自動下載到專案內的 cascades/，
+# 這樣換到任何機器都能跑，不需要額外安裝套件。
+CASCADE_SEARCH_PATHS = [
+    BASE_DIR / "cascades",                                   # 專案內（優先）
+    Path("/usr/share/opencv4/haarcascades"),                 # Debian opencv
+    Path("/usr/share/opencv/haarcascades"),                  # 舊版 Debian
+    Path("/usr/local/share/opencv4/haarcascades"),          # 自編譯
+]
+
+# 自動下載來源（OpenCV 官方 GitHub）
+CASCADE_DOWNLOAD_URL = (
+    "https://raw.githubusercontent.com/opencv/opencv/4.x/data/haarcascades/"
+    + FACE_DETECTOR_PATH
+)
 
 # LBPH 參數：這 4 個值決定「紋理特徵向量」怎麼抽
 #   radius / neighbors / grid_x / grid_y
@@ -214,6 +239,73 @@ def imread_safe(path, flags=cv2.IMREAD_GRAYSCALE):
 # 1. HAAR Cascade 人臉偵測
 # ============================================================
 
+def find_cascade_file(cascade_path: Optional[str] = None,
+                      auto_download: bool = True) -> Path:
+    """
+    找出 HAAR cascade 檔案的實際路徑。
+
+    搜尋順序
+    --------
+    1. 呼叫端指定的路徑
+    2. 專案內的 cascades/ 資料夾
+    3. cv2.data.haarcascades（Windows 的 opencv-python 才有）
+    4. 系統路徑（Debian opencv-data 套件）
+    5. 從 OpenCV 官方 GitHub 下載到專案內
+
+    為什麼需要這麼多來源？
+    ----------------------
+    Windows 上 opencv-python 會把 cascade 放在 cv2.data 裡，
+    但 Raspberry Pi 的 Debian opencv 沒有 cv2.data 屬性，
+    檔案通常在 /usr/share/opencv4/haarcascades/。
+    同一份程式要能在兩邊跑，就不能只依賴 cv2.data。
+
+    參數
+    ----
+    cascade_path : str | None
+        指定路徑；若該路徑不存在會繼續往下搜尋
+    auto_download : bool
+        都找不到時是否自動下載（需要網路）
+
+    回傳
+    ----
+    Path : 找到或下載的檔案路徑
+    """
+    # 1. 呼叫端指定
+    if cascade_path:
+        p = Path(cascade_path)
+        if p.exists():
+            return p
+
+    # 2~4. 各種候選位置
+    candidates = list(CASCADE_SEARCH_PATHS)
+
+    # cv2.data 只有部分套件有（opencv-python 有，Debian 版沒有）
+    data_dir = getattr(getattr(cv2, "data", None), "haarcascades", None)
+    if data_dir:
+        candidates.append(Path(data_dir))
+
+    for d in candidates:
+        p = d / FACE_DETECTOR_PATH
+        if p.exists():
+            return p
+
+    # 5. 自動下載到專案內
+    local = CASCADE_SEARCH_PATHS[0] / FACE_DETECTOR_PATH
+    if auto_download:
+        try:
+            local.parent.mkdir(parents=True, exist_ok=True)
+            print("[face_core] 系統內找不到 cascade，正在從官方來源下載…")
+            urllib.request.urlretrieve(CASCADE_DOWNLOAD_URL, str(local))
+            if local.exists() and local.stat().st_size > 1000:
+                print(f"[face_core] 已下載到 {local}")
+                return local
+        except Exception as e:
+            print(f"[face_core] 下載失敗：{e}")
+
+    # 都找不到 → 回傳專案內路徑，讓錯誤訊息指出預期位置
+    return local
+
+
 def build_face_detector(cascade_path: Optional[str] = None) -> cv2.CascadeClassifier:
     """
     建立 HAAR 人臉偵測器。
@@ -221,8 +313,7 @@ def build_face_detector(cascade_path: Optional[str] = None) -> cv2.CascadeClassi
     參數
     ----
     cascade_path : str | None
-        指定 cascade XML 路徑；None 則使用 OpenCV 內建的
-        haarcascade_frontalface_alt.xml。
+        指定 cascade XML 路徑；None 則自動搜尋／下載
 
     回傳
     ----
@@ -232,10 +323,19 @@ def build_face_detector(cascade_path: Optional[str] = None) -> cv2.CascadeClassi
     ------
     FileNotFoundError : 找不到 cascade 檔案時
     """
-    path = Path(cascade_path) if cascade_path else Path(cv2.data.haarcascades) / FACE_DETECTOR_PATH
+    path = find_cascade_file(cascade_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"找不到 HAAR cascade 檔案：{path}")
+        tried = "\n        ".join(str(d / FACE_DETECTOR_PATH)
+                                    for d in CASCADE_SEARCH_PATHS)
+        raise FileNotFoundError(
+            f"找不到 HAAR cascade 檔案：{path}\n"
+            f"    已搜尋：\n        {tried}\n"
+            f"    解法：\n"
+            f"        1. 安裝系統套件：sudo apt install opencv-data\n"
+            f"        2. 手動下載後放到專案的 cascades/ 資料夾\n"
+            f"        3. 確認有網路，讓程式自動下載"
+        )
 
     detector = cv2.CascadeClassifier(str(path))
     if detector.empty():

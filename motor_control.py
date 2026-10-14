@@ -1,21 +1,34 @@
 """
 motor_control.py — 馬達控制抽象層
 ==================================
-同一份介面，兩種執行模式：
+包裝課程提供的 LOBOROBOT2.py，把 4 輪馬達 + 2 軸雲台統一成
+與 app.py / Web 介面一致的動作介面。
 
-    模擬模式 (SIMULATION) : 目前在電腦上測試。只記錄指令、不接硬體
-    真實模式 (RPI)        : 上車後用 I2C + PCA9685 驅動實際馬達
-
-為什麼要這樣分
---------------
-現在還不能用车，但 Web 介面、執行緒結構、API 路由都要先做好並測試。
-把「硬體相依」限制在這一個檔案裡，其他模組完全不碰 I2C，
-上車時只要換 backend，不必重寫 app.py。
-
-對應課程進度
+兩種執行模式
 ------------
-- I2C / PCA9685：16 通道 12-bit PWM，PRESCALE 公式與寄存器操作
-- threading.Lock：Flask 是多執行緒環境，多個請求同時下指令會讓 I2C 當機
+    模擬模式 (SIMULATION) : 在電腦上測試，只計算左右輪速度、不碰硬體
+    真實模式 (RPI)        : 車上，實際驅動 LOBOROBOT 的 4 個馬達與 2 個舵機
+
+硬體對應（來自 LOBOROBOT2.py，不可憑猜測）
+------------------------------------------
+    馬達 0  左前輪   PWM 通道 0    方向 IN1=2, IN2=1     ← 方向邏輯是反的
+    馬達 1  右前輪   PWM 通道 5    方向 IN1=3, IN2=4
+    馬達 2  左後輪   PWM 通道 6    方向 IN1=8, IN2=7
+    馬達 3  右後輪   PWM 通道 11   方向走 GPIO 25 / 24（不是 PCA9685）
+
+    舵機    通道 9  頂部（左右搖擺）
+    舵機    通道 10 底座（上下俯仰）
+
+注意
+----
+    馬達 0 在 LOBOROBOT2.py 裡用的是 `not forward`，代表它的接線極性
+    與其他三顆相反。所有動作都必須呼叫 LOBOROBOT 提供的方法，
+    不要自行拼 PWM，否則車子的轉向會整個反掉。
+
+對應課程內容
+------------
+- PCA9685：16 通道 12-bit PWM，PRESCALE = 25000000/(4096*freq - 1)
+- threading.Lock：Flask 多執行緒同時下指令會讓 I2C 當機
 - 後退加 time.sleep() 緩啟動，避免 RPi 5 瞬時電流尖峰
 """
 
@@ -30,7 +43,7 @@ from typing import Optional
 MODE_SIMULATION = "simulation"
 MODE_RPI = "rpi"
 
-# 合法動作
+# 動作名稱
 ACTIONS = ("forward", "backward", "left", "right", "forward_left",
            "forward_right", "backward_left", "backward_right", "stop")
 
@@ -38,12 +51,12 @@ ACTIONS = ("forward", "backward", "left", "right", "forward_left",
 ACTION_LABELS = {
     "forward": "前進",
     "backward": "後退",
-    "left": "左轉",
-    "right": "右轉",
-    "forward_left": "前左轉",
-    "forward_right": "前右轉",
-    "backward_left": "後左轉",
-    "backward_right": "後右轉",
+    "left": "原地左轉",
+    "right": "原地右轉",
+    "forward_left": "左平移",
+    "forward_right": "右平移",
+    "backward_left": "後左退",
+    "backward_right": "後右退",
     "stop": "停止",
 }
 
@@ -55,12 +68,13 @@ class MotorState:
     speed: int = 0
     left_speed: int = 0
     right_speed: int = 0
-    servo_x: int = 90          # 伺服馬達水平角度 (0~180)
-    servo_y: int = 90          # 伺服馬達垂直角度 (0~180)
+    servo_x: int = 90          # 頂部舵機（左右）0~180
+    servo_y: int = 90          # 底座舵機（上下）0~180
     mode: str = MODE_SIMULATION
     command_count: int = 0
     last_command: str = ""
     last_command_time: float = field(default_factory=time.time)
+    hardware_ok: bool = False  # 真實模式是否成功連上硬體
 
     def to_dict(self) -> dict:
         return {
@@ -75,6 +89,7 @@ class MotorState:
             "command_count": self.command_count,
             "last_command": self.last_command,
             "last_command_time": self.last_command_time,
+            "hardware_ok": self.hardware_ok,
         }
 
 
@@ -84,33 +99,21 @@ class MotorControl:
 
     用法
     ----
-        motor = MotorControl(mode=MODE_SIMULATION)
-        motor.move("forward")
-        motor.set_speed(60)
-        motor.servo_to(45, 120)
+        motor = MotorControl(mode=MODE_SIMULATION)   # 電腦測試
+        motor = MotorControl(mode=MODE_RPI)          # 車上
+
+        motor.move("forward", speed=50)
+        motor.set_speed(70)
+        motor.servo_to(x=45, y=120)
         motor.stop()
+        motor.shutdown()
 
     執行緒安全
     ----------
     所有對硬體的操作都在 self.lock 保護下進行。
-    Flask 多執行緒同時送指令時，若沒有鎖，會有多個執行緒同時
-    寫 I2C，導致 PCA9685 當機（課堂 TROUBLE SHOOTING 提到的原因之一）。
+    Flask 是多執行緒環境，若沒有鎖，多個請求同時寫 I2C 會讓 PCA9685 當機
+    （課堂 TROUBLE SHOOTING 提到的原因之一）。
     """
-
-    # PCA9685 I2C 位址（課程簡報：預設 0x40）
-    PCA9685_ADDR = 0x40
-    PCA9685_FREQ = 50          # 伺服馬達用 50Hz
-    PRESCALE = 121             # 25000000 / (4096 * 50 - 1) ≈ 121
-
-    # 馬達通道（左/右/攝影頭雲台 俯仰/方位）
-    CH_LEFT = 0
-    CH_RIGHT = 1
-    CH_SERVO_Y = 2
-    CH_SERVO_X = 3
-
-    # 速度範圍（0~100，對應 PCA9685 的 0~4095 duty）
-    MIN_PWM = 0
-    MAX_PWM = 4095
 
     def __init__(self, mode: str = MODE_SIMULATION,
                  default_speed: int = 50,
@@ -119,9 +122,9 @@ class MotorControl:
         參數
         ----
         mode : str
-            MODE_SIMULATION（預設，PC 測試用）或 MODE_RPI（上車用）
+            MODE_SIMULATION（預設，PC 測試用）或 MODE_RPI（車上用）
         default_speed : int
-            前進/後退時的預設速度 0~100
+            前進/後退的預設速度 0~100
         soft_start_delay : float
             後退緩啟動延遲（秒）。避免 RPi 5 馬達啟動的瞬時電流尖峰
         """
@@ -132,13 +135,12 @@ class MotorControl:
         self.default_speed = max(0, min(100, default_speed))
         self.soft_start_delay = soft_start_delay
 
-        # 執行緒鎖：保護所有 I2C 操作
+        # 執行緒鎖：保護所有 I2C / GPIO 操作
         self.lock = threading.Lock()
 
-        # 硬體句柄（只有 RPI 模式才有）
-        self._bus = None
-        self._pca = None
-        self._warned = False
+        # LOBOROBOT 實例（只有 RPI 模式才有）
+        self._robot = None
+        self._init_error: str = ""
 
         self.state = MotorState(mode=mode)
 
@@ -147,75 +149,69 @@ class MotorControl:
 
     # ── 硬體初始化 ──────────────────────────────────────
     def _init_hardware(self) -> None:
-        """初始化 I2C 與 PCA9685（僅真實模式）。"""
+        """
+        建立 LOBOROBOT 實例。
+
+        注意：LOBOROBOT2.py 需要 smbus 與 gpiozero，且會直接對 I2C 下手。
+        如果初始化失敗，記住錯誤訊息但不要讓整個程式崩潰 ——
+        辨識功能應該要能獨立運作。
+        """
         try:
-            import board
-            import adafruit_pca9685
-            from adafruit_blinka.typing.wait import wait_for_blocks
+            from LOBOROBOT2 import LOBOROBOT
         except ImportError as e:
-            raise RuntimeError(
-                "真實模式需要安裝：\n"
-                "  sudo apt install python3-smbus i2c-tools\n"
-                "  pip install adafruit-circuitpython-pca9685 gpiozero\n"
-                f"（錯誤：{e}）"
-            ) from e
+            self._init_error = (
+                f"找不到 LOBOROBOT2.py（{e}）。"
+                "請確認檔案與 motor_control.py 在同一個目錄。"
+            )
+            print(f"[motor] {self._init_error}")
+            return
 
         try:
-            self._bus = board.I2C()
-            self._pca = adafruit_pca9685.PCA9685(self._bus, self.PCA9685_ADDR)
-            self._pca.frequency = self.PCA9685_FREQ
-            wait_for_blocks()      # 等待 OSC 穩定
-            # PCA9685 開機預設是睡眠模式，必須喚醒才會輸出 PWM
-            time.sleep(0.01)
-            print(f"[motor] PCA9685 已初始化 @ 0x{self.PCA9685_ADDR:02X}, "
-                  f"{self.PCA9685_FREQ}Hz")
+            self._robot = LOBOROBOT()
+            self.state.hardware_ok = True
+            print("[motor] LOBOROBOT 硬體初始化成功（PCA9685 @ 0x40, 50Hz）")
         except Exception as e:
-            raise RuntimeError(
-                f"PCA9685 初始化失敗：{e}\n"
+            self._init_error = (
+                f"LOBOROBOT 初始化失敗：{type(e).__name__}: {e}\n"
                 "請檢查：\n"
-                "  1. I2C 是否啟用：sudo raspi-config → Interface Options → I2C\n"
-                "  2. 模組接線是否正確（SDA/SCL/VCC/GND）\n"
-                "  3. sudo i2cdetect -y 1 看是否看到 0x40"
-            ) from e
+                "  1. I2C 是否啟用：sudo raspi-config → Interface Options → I2C → Yes\n"
+                "  2. PCA9685 接線（SDA/SCL/VCC/GND）\n"
+                "  3. sudo i2cdetect -y 1 是否看得到 0x40\n"
+                "  4. GPIO 24/25 是否已被其他程式佔用"
+            )
+            print(f"[motor] {self._init_error}")
 
-    # ── PWM 底層輸出 ────────────────────────────────────
-    def _set_channel(self, channel: int, duty: float) -> None:
+    @property
+    def hardware_available(self) -> bool:
+        """真實模式下硬體是否可用。"""
+        return self._robot is not None
+
+    # ── 動作分派表 ──────────────────────────────────────
+    # 對應 LOBOROBOT2.py 的方法簽名 (speed, t_time)
+    def _simulated_wheels(self, action: str, speed: int) -> tuple[int, int]:
         """
-        設定單一 PWM 通道的 duty cycle。
+        模擬模式計算左右輪速度。
 
-        參數
-        ----
-        channel : int，0~15
-        duty    : float，0.0~1.0（1.0 = 全速）
+        正負號：正值 = 該輪前進，負值 = 該輪後退。
+        用來在沒有車子時驗證「這個動作實際上會怎麼轉」。
         """
-        if not 0.0 <= duty <= 1.0:
-            raise ValueError(f"duty 必須在 0~1 之間：{duty}")
-
-        value = int(self.MAX_PWM * duty)
-
-        # PCA9685 每個通道 4 個暫存器：
-        #   LEDx_ON_L  = 0x06 + 4*x   LEDx_ON_H  = 0x07 + 4*x
-        #   LEDx_OFF_L = 0x08 + 4*x   LEDx_OFF_H = 0x09 + 4*x
-        # ON_L = 0（全亮起始）、OFF_L/H = duty（全亮結束）
-        on_l = 0x06 + 4 * channel
-        off_l = on_l + 2
-
-        try:
-            self._bus.write_byte_data(self.PCA9685_ADDR, on_l, 0)
-            self._bus.write_byte_data(self.PCA9685_ADDR, off_l, value & 0xFF)
-            self._bus.write_byte_data(
-                self.PCA9685_ADDR, off_l + 1, (value >> 8) & 0x0F)
-        except Exception as e:
-            self._warn_once(f"寫入 PWM 失敗：{e}")
-
-    def _warn_once(self, msg: str) -> None:
-        """錯誤只提示一次，避免刷版。"""
-        if not self._warned:
-            print(f"[motor][WARN] {msg}")
-            self._warned = True
+        base, half = speed, speed // 2
+        table = {
+            "stop":           (0, 0),
+            "forward":        (base, base),
+            "backward":       (-base, -base),
+            "left":           (base, -base),      # 原地左旋：左輪前、右輪後
+            "right":          (-base, base),      # 原地右旋：右輪前、左輪後
+            "forward_left":   (half, base),       # 左平移：右輪快 → 往左走
+            "forward_right":  (base, half),       # 右平移
+            "backward_left":  (-half, -base),
+            "backward_right": (-base, -half),
+        }
+        return table[action]
 
     # ── 對外動作介面 ────────────────────────────────────
-    def move(self, action: str, speed: Optional[int] = None) -> dict:
+    def move(self, action: str, speed: Optional[int] = None,
+             duration: float = 0.0) -> dict:
         """
         執行一個動作。
 
@@ -227,6 +223,8 @@ class MotorControl:
             backward_left / backward_right / stop
         speed : int | None
             0~100，None 代表用 default_speed
+        duration : float
+            持續幾秒後自動停止。0 = 持續轉動（需另外呼叫 stop()）
 
         回傳
         ----
@@ -239,9 +237,11 @@ class MotorControl:
 
         with self.lock:
             if self.mode == MODE_SIMULATION:
-                self._simulate(action, spd)
+                left, right = self._simulated_wheels(action, spd)
+                self.state.left_speed = left
+                self.state.right_speed = right
             else:
-                self._drive(action, spd)
+                self._drive(action, spd, duration)
 
             self.state.action = action
             self.state.speed = 0 if action == "stop" else spd
@@ -251,68 +251,58 @@ class MotorControl:
 
         return self.state.to_dict()
 
-    def _simulate(self, action: str, speed: int) -> None:
+    def _drive(self, action: str, speed: int, duration: float) -> None:
         """
-        模擬模式：只計算左右輪速度，不碰硬體。
+        真實模式：呼叫 LOBOROBOT2.py 的方法驅動馬達。
 
-        之所以還要算左右輪速度，是為了讓 Web UI 能顯示
-        「這顆指令實際上會怎麼轉」，驗證 PID / 差速控制的邏輯。
-
-        正負號的意義：正值 = 該輪正轉，負值 = 該輪反轉。
+        所有 PWM / 方向控制都交給 LOBOROBOT，
+        不要在這裡自行組 PWM 值 —— 馬達 0 的方向極性是反的，
+        自己寫會讓車子往反方向跑。
         """
-        base, half = speed, speed // 2
-        left, right = self._wheel_targets(action, base, half)
-
-        self.state.left_speed = left
-        self.state.right_speed = right
-
-    @staticmethod
-    def _wheel_targets(action: str, base: int, half: int) -> tuple[int, int]:
-        """
-        動作 → (左輪速度, 右輪速度)，正負號代表轉向。
-
-        這是模擬與真實模式共用的唯一對照表，
-        兩邊共用才能確保 Web UI 顯示的與實際車子行為一致。
-
-        差速原理：讓左右輪不同速就能轉彎，兩輪反向就能原地旋轉。
-        """
-        table = {
-            "stop":           (0, 0),
-            "forward":        (base, base),
-            "backward":       (-base, -base),
-            "left":           (-base, base),       # 原地左旋
-            "right":          (base, -base),       # 原地右旋
-            "forward_left":   (half, base),        # 左輪減速 → 左彎
-            "forward_right":  (base, half),        # 右輪減速 → 右彎
-            "backward_left":  (-base, -half),
-            "backward_right": (-half, -base),
-        }
-        return table[action]
-
-    def _drive(self, action: str, speed: int) -> None:
-        """真實模式：實際驅動馬達（僅樹莓派）。"""
-        if action == "stop":
-            self._set_channel(self.CH_LEFT, 0.0)
-            self._set_channel(self.CH_RIGHT, 0.0)
+        if self._robot is None:
+            # 硬體不可用時退化成模擬，不讓 Web 介面整個壞掉
+            left, right = self._simulated_wheels(action, speed)
+            self.state.left_speed = left
+            self.state.right_speed = right
             return
 
-        base, half = speed, speed // 2
-        left, right = self._wheel_targets(action, base, half)
-
-        self.state.left_speed = left
-        self.state.right_speed = right
+        robot = self._robot
+        t = duration if duration > 0 else 0
 
         # 後退緩啟動：避免 RPi 5 瞬時電流尖峰
         # （課堂 TROUBLE SHOOTING 提到的做法）
-        if action.startswith("backward") and self.soft_start_delay > 0:
+        if action == "backward" and self.soft_start_delay > 0:
             time.sleep(self.soft_start_delay)
 
-        # PCA9685 只認絕對值；方向由另外的 GPIO 方向腳位決定
-        self._set_channel(self.CH_LEFT, abs(left) / 100.0)
-        self._set_channel(self.CH_RIGHT, abs(right) / 100.0)
+        try:
+            if action == "stop":
+                robot.t_stop(t)
+            elif action == "forward":
+                robot.moveforward(speed, t)
+            elif action == "backward":
+                robot.movebackward(speed, t)
+            elif action == "left":
+                robot.turnLeft(speed, t)
+            elif action == "right":
+                robot.turnRight(speed, t)
+            elif action == "forward_left":
+                robot.moveLeft(speed, t)
+            elif action == "forward_right":
+                robot.moveRight(speed, t)
+            elif action == "backward_left":
+                robot.backward_Left(speed, t)
+            elif action == "backward_right":
+                robot.backward_Right(speed, t)
+        except Exception as e:
+            print(f"[motor] 驅動失敗（{action}）：{type(e).__name__}: {e}")
+
+        # 更新狀態顯示（真實模式也要讓 Web UI 知道左右輪狀態）
+        left, right = self._simulated_wheels(action, speed)
+        self.state.left_speed = left
+        self.state.right_speed = right
 
     def stop(self) -> dict:
-        """停止所有馬達。"""
+        """停止所有馬達與舵機。"""
         return self.move("stop", 0)
 
     def set_speed(self, speed: int) -> dict:
@@ -326,14 +316,16 @@ class MotorControl:
 
     def servo_to(self, x: Optional[int] = None, y: Optional[int] = None) -> dict:
         """
-        控制攝影頭雲台角度。
+        控制雲台角度。
 
         參數
         ----
-        x : int | None，水平角度 0~180（90 = 正中間）
-        y : int | None，垂直角度 0~180
+        x : int | None，頂部舵機（左右）角度 0~180
+        y : int | None，底座舵機（上下）角度 0~180
 
-        伺服馬達用 50Hz PWM，duty = 角度 / 180
+        LOBOROBOT2.set_servo_angle() 的角度換算公式是
+            pulse_width_us = angle * 11 + 500
+        也就是 0° = 500µs、180° = 2480µs。
         """
         with self.lock:
             if x is not None:
@@ -343,9 +335,14 @@ class MotorControl:
                 y = max(0, min(180, int(y)))
                 self.state.servo_y = y
 
-            if self.mode == MODE_RPI:
-                self._set_channel(self.CH_SERVO_X, self.state.servo_x / 180.0)
-                self._set_channel(self.CH_SERVO_Y, self.state.servo_y / 180.0)
+            if self._robot is not None:
+                try:
+                    if x is not None:
+                        self._robot.set_servo_angle(9, x, 0)
+                    if y is not None:
+                        self._robot.set_servo_angle(10, y, 0)
+                except Exception as e:
+                    print(f"[motor] 舵機設定失敗：{type(e).__name__}: {e}")
 
         return self.state.to_dict()
 
@@ -364,56 +361,70 @@ class MotorControl:
         self.state.last_command = "緊急停止"
         self.state.last_command_time = time.time()
 
-        if self.mode == MODE_RPI:
+        if self._robot is not None:
             try:
-                self._set_channel(self.CH_LEFT, 0.0)
-                self._set_channel(self.CH_RIGHT, 0.0)
-            except Exception:
-                pass
+                self._robot.t_stop(0)
+            except Exception as e:
+                print(f"[motor] 緊急停止失敗：{e}")
 
         return self.state.to_dict()
 
     def shutdown(self) -> None:
-        """程式結束前呼叫：確保馬達停下。"""
+        """程式結束前呼叫：確保馬達停下、雲台回中。"""
         try:
             self.stop()
-            if self.mode == MODE_RPI and self._bus is not None:
+            if self._robot is not None:
                 time.sleep(0.05)
-                self._set_channel(self.CH_LEFT, 0.0)
-                self._set_channel(self.CH_RIGHT, 0.0)
-                self._set_channel(self.CH_SERVO_Y, 0.5)   # 雲台回中
-                self._set_channel(self.CH_SERVO_X, 0.5)
+                self._robot.set_servo_angle(9, 90, 0)
+                self._robot.set_servo_angle(10, 90, 0)
         except Exception:
             pass
 
 
 if __name__ == "__main__":
-    """自我測試：模擬模式下所有動作都能跑。"""
-    print("=" * 58)
-    print("  馬達控制模擬測試 (SIMULATION)")
-    print("=" * 58)
+    """自我測試。"""
+    import sys
 
-    m = MotorControl(mode=MODE_SIMULATION, default_speed=60)
+    print("=" * 66)
+    print("  馬達控制測試")
+    print("=" * 66)
 
-    print(f"\n模式：{m.mode}\n")
-    print(f"{'動作':<16s}{'左輪':>8s}{'右輪':>8s}{'速度':>8s}")
-    print("-" * 58)
+    # 從命令列決定模式：python motor_control.py rpi
+    mode = MODE_RPI if (len(sys.argv) > 1 and sys.argv[1] == "rpi") else MODE_SIMULATION
+    m = MotorControl(mode=mode, default_speed=60)
+
+    print(f"\n模式：{m.mode}")
+    if mode == MODE_RPI:
+        print(f"硬體可用：{m.hardware_available}")
+        if not m.hardware_available:
+            print(f"錯誤：{m._init_error}")
+            print("\n硬體未就緒，改用模擬模式測試。")
+            m = MotorControl(mode=MODE_SIMULATION, default_speed=60)
+
+    print()
+    print(f"{'動作':<14s}{'左輪':>8s}{'右輪':>8s}{'速度':>8s}")
+    print("-" * 66)
 
     for act in ACTIONS:
         s = m.move(act)
-        print(f"{s['label']:<16s}{s['left_speed']:>8d}{s['right_speed']:>8d}{s['speed']:>8d}")
+        print(f"{s['label']:<14s}{s['left_speed']:>8d}{s['right_speed']:>8d}{s['speed']:>8d}")
 
     print()
     s = m.set_speed(30)
-    print(f"調整速度後：{s['label']}  速度={s['speed']}  "
+    print(f"速度調整後：{s['label']}  速度={s['speed']}  "
           f"左={s['left_speed']} 右={s['right_speed']}")
 
     s = m.servo_to(45, 135)
-    print(f"雲台角度：X={s['servo_x']}  Y={s['servo_y']}")
+    print(f"雲台角度：頂部(左右) X={s['servo_x']}°  底座(上下) Y={s['servo_y']}°")
 
     s = m.emergency_stop()
-    print(f"緊急停止：{s['label']}  速度={s['speed']}")
+    print(f"緊急停止：{s['last_command']}  速度={s['speed']}")
 
+    m.shutdown()
     print(f"\n累計指令數：{s['command_count']}")
-    print("\n[OK] 模擬模式全部動作測試通過")
-    print("     上車後改用 MotorControl(mode=MODE_RPI) 即接真實馬達")
+    print()
+    if mode == MODE_RPI:
+        print("[OK] 真實模式測試結束（請確認車子已停止）")
+    else:
+        print("[OK] 模擬模式全部動作測試通過")
+        print("     車上執行：python motor_control.py rpi")
