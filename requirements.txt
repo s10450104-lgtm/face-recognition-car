@@ -18,3 +18,27 @@ Flask>=3.0
 # 真實馬達控制另外需要：
 #   sudo apt install python3-smbus i2c-tools
 #   pip install adafruit-circuitpython-pca9685 gpiozero
+
+# ─────────────────────────────────────────────────────────────
+#  YOLOv8 物件偵測（選用，yolo_detector.py 需要）
+# ─────────────────────────────────────────────────────────────
+#
+# ⚠️ 樹莓派（ARM）請務必照下面兩行安裝，不要直接 pip install ultralytics：
+#
+#     pip install torch torchvision \
+#         --index-url https://download.pytorch.org/whl/cpu
+#     pip install ultralytics
+#
+# 原因：ultralytics 會把 NVIDIA 的 CUDA 套件一起抓下來
+#      （nvidia_cublas 一個就 542 MB），樹莓派沒有 NVIDIA GPU
+#      用不到，下載到一半還會因為檔案太大而失敗：
+#          error: incomplete-download
+#
+# 用上面的 CPU 索引就不會拉 CUDA 套件。
+#
+# 模型檔 yolo_model.pt（6.3 MB）不入版控，下載指令：
+#     wget https://github.com/ultralytics/assets/releases/download/v8.1.0/yolov8n.pt \
+#          -O yolo_model.pt
+#
+# 沒有安裝 YOLO 也不影響系統運作 —— 會自動降級成
+# 「只做人臉辨識，不做物件偵測」。

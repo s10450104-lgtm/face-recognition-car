@@ -56,6 +56,46 @@ def _silence_opencv_logs() -> None:
 _silence_opencv_logs()
 
 
+# ────────────────────────────────────────────────────────────────
+#  影像方向設定
+# ────────────────────────────────────────────────────────────────
+#  車上的攝影機常因為機構安裝而上下顛倒，這裡統一校正。
+#
+#  可用環境變數覆蓋（不用改程式就能調整）：
+#      CAMERA_FLIP=none | h | v | both
+#
+#      none  不翻轉（原始方向）
+#      h     左右鏡像（自拍鏡頭效果，讓文字正著看）
+#      v     上下翻轉
+#      both  旋轉 180 度（上下 + 左右都翻）
+#
+#  車上攝影機上下顛倒 → 用 both
+#  想要一般監控視角（看起來跟真實世界一樣）→ 用 none
+#
+_CAMERA_FLIP = os.environ.get("CAMERA_FLIP", "both").strip().lower()
+_FLIP_CODES = {"none": None, "": None, "h": 1, "v": 0, "both": -1}
+FLIP_CODE = _FLIP_CODES.get(_CAMERA_FLIP, -1)
+
+
+def apply_orientation(frame):
+    """
+    套用影像方向校正。
+
+    攝影機讀回原始畫面 → 依 CAMERA_FLIP 設定轉正。
+
+    參數
+    ----
+    frame : np.ndarray
+
+    回傳
+    ----
+    np.ndarray : 校正後的影像（若設定為 none 則原樣回傳）
+    """
+    if frame is None or FLIP_CODE is None:
+        return frame
+    return cv2.flip(frame, FLIP_CODE)
+
+
 class CameraSource:
     """
     統一包裝不同攝影機來源的介面。
@@ -75,16 +115,22 @@ class CameraSource:
 
     # ── 讀取 ──────────────────────────────────────────────
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
-        """讀取一幀。回傳 (ok, frame)；frame 為 BGR 三通道 ndarray。"""
+        """
+        讀取一幀，已套用方向校正。
+
+        回傳 (ok, frame)；frame 為 BGR 三通道 ndarray。
+        """
         if self._cap is not None:
-            return self._cap.read()
+            ok, frame = self._cap.read()
+            return ok, apply_orientation(frame) if ok else frame
 
         if self._picam is not None:
             frame = self._picam.capture_array()
             if frame is None:
                 return False, None
             # Picamera2 預設回傳 RGB，OpenCV 要 BGR
-            return True, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            return True, apply_orientation(frame)
 
         return False, None
 

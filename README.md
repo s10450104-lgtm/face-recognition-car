@@ -202,8 +202,10 @@ curl http://127.0.0.1:5000/api/status
 
 ```
 face/
-├── app.py                 # ★ Flask Web 主程式（遙控 + 辨識整合）
+├── app.py                 # ★ Flask Web 主程式（遙控 + 辨識 + YOLO 整合）
 ├── motor_control.py       # ★ 馬達控制（模擬模式 / 樹莓派真實模式）
+├── yolo_detector.py       # ★ YOLOv8 物件偵測（第二階段）
+├── yolo_model.pt          #   YOLO 權重（.gitignore 排除，6.3 MB）
 ├── templates/
 │   └── index.html         # ★ Web 介面（Cyberpunk 風格）
 ├── static/
@@ -216,9 +218,13 @@ face/
 ├── recognize_lbph.py      # Step 3：即時人臉辨識（命令列 + 視窗）
 ├── face_core.py           # 核心模組（偵測/裁切/正規化/訓練/辨識）
 ├── camera_source.py       # 鏡頭抽象層（PC webcam ↔ RPi Picamera2）
+├── LOBOROBOT2.py          # 課程提供的馬達控制庫（真實模式才會用到）
 ├── self_test.py           # 環境與流程自我檢查
 ├── site/                  # ★ 作業報告（靜態 HTML，瀏覽器直接開啟）
-│   ├── index.html         #   報告主頁（8 章節）
+│   ├── index_template.html  #   報告模板（改這個）
+│   ├── index.html           #   產生的單檔版（圖片 base64 內嵌）
+│   ├── make_standalone.py   #   模板 → 單檔版
+│   ├── upload_neocities.py  #   上傳到 Neocities
 │   └── assets/
 │       ├── report.css
 │       └── shot-*.jpg     #   實作截圖
@@ -455,7 +461,175 @@ python recognize_lbph.py
 
 ---
 
+## YOLOv8 物件偵測（第二階段）
+
+在既有的 HAAR + LBPH 人臉辨識之外，加上了 YOLOv8n 物件偵測，
+偵測本作業指定的五類：**人 / 汽車 / 公車 / 機車 / 自行車**。
+
+### 安裝
+
+```bash
+# ⚠️ 樹莓派一定要用 CPU 索引，理由見下方疑難排解
+pip install torch torchvision \
+    --index-url https://download.pytorch.org/whl/cpu
+pip install ultralytics
+
+# 模型檔（6.3 MB，不入版控）
+wget https://github.com/ultralytics/assets/releases/download/v8.1.0/yolov8n.pt \
+     -O yolo_model.pt
+```
+
+沒有安裝也沒關係，系統會自動降級成「只做人臉辨識，不做物件偵測」。
+
+### 效能實測（Raspberry Pi 5 / Debian 13 / torch 2.14.1+cpu）
+
+| imgsz | 推論耗時 | FPS |
+|------:|--------:|----:|
+| 640 | 184.5 ms | 5.42 |
+| 416 | 92.6 ms | 10.80 |
+| **320** | **91.9 ms** | **10.89** ← 採用 |
+| 256 | 57.7 ms | 17.34 |
+
+**為什麼是 320？** 640 的耗時是 320 的兩倍，但物件偵測是看大方向用，
+解析度低一點完全夠用，省下的時間給影像串流。
+
+### 設計：為什麼推論要放獨立執行緒
+
+樹莓派 4 個核心，YOLO 單次推論要 90 ms 以上。若直接在串流迴圈裡推論，
+影像串流會掉到 5 FPS 以下（實測）。
+
+改成獨立背景執行緒後：
+
+| 項目 | 數值 |
+|---|---|
+| 影像串流 FPS | 14.9（只有人臉辨識時是 20）|
+| YOLO 推論 FPS | 10.0 |
+| 跳幀設定 | 每 3 幀推論一次 |
+
+串流與推論透過 `state` 交換資料：`yolo_loop()` 讀 `state.raw_frame`
+推論後寫 `state.ai_results`，串流迴圈只負責把結果畫上去。
+前端另外用 `/api/ai_status` 抓取，不會卡住串流。
+
+### 可調參數
+
+都在 `app.py` 開頭：
+
+```python
+YOLO_ENABLED = True        # 沒裝 ultralytics 時可設 False
+YOLO_IMGSZ = 320           # 想更流暢可降到 256
+YOLO_CONF = 0.30           # 信心門檻
+YOLO_SKIP_FRAMES = 3       # 每 N 幀推論一次
+```
+
+串流和 AI 在搶 CPU。若覺得卡，先把 `YOLO_SKIP_FRAMES` 調到 4~5，
+或把 `YOLO_IMGSZ` 降到 256。
+
+### API
+
+```
+GET /api/ai_status
+```
+
+```json
+{
+  "enabled": true,
+  "imgsz": 320,
+  "skip_frames": 3,
+  "class_ids": [0, 1, 2, 3, 5],
+  "infer_ms": 99.8,
+  "fps": 10.0,
+  "count": 1,
+  "detections": [
+    { "class": "person", "cn": "人", "conf": 0.93, "rect": [0, 0, 617, 473] }
+  ]
+}
+```
+
+`class_ids` 對應 COCO 編號：
+
+| 編號 | 類別 | 中文 |
+|----:|------|------|
+| 0 | person | 人 |
+| 1 | bicycle | 自行車 |
+| 2 | car | 汽車 |
+| 3 | motorcycle | 機車 |
+| 5 | bus | 公車 |
+
+### 命令列測試
+
+```bash
+python yolo_detector.py
+```
+
+會開攝影機抓一幀、跑一次推論、印出結果，
+並驗證跳幀設定是否真的有效果。
+
+---
+
 ## 疑難排解
+
+### pip install ultralytics 失敗：incomplete-download
+
+**症狀**
+
+```
+error: incomplete-download
+? Download failed after 6 attempts because not enough bytes were received
+?   (195.8 MB/542.8 MB)
+? URL: .../nvidia_cublas-13.1.1.3-py3-none-manylinux_2_27_aarch64.whl
+```
+
+**原因**
+
+`ultralytics` 會連帶安裝 NVIDIA 的 CUDA 套件，
+其中 `nvidia_cublas` 一個就有 **542 MB**。
+
+樹莓派沒有 NVIDIA GPU，這些套件根本用不到；
+加上檔案太大，連線中斷後 pip 續傳也傳不完，就會失敗。
+
+**解決**
+
+改用 PyTorch 官方的 **CPU 專用索引**：
+
+```bash
+pip install torch torchvision \
+    --index-url https://download.pytorch.org/whl/cpu
+pip install ultralytics
+```
+
+CPU 版不會拉任何 CUDA 套件，torch 本體只有 99 MB，安裝順利。
+
+### 安裝 YOLO 後人臉辨識壞掉：cv2 has no attribute 'CascadeClassifier'
+
+**症狀**
+
+```
+[FAIL] 完整流程  → AttributeError: module 'cv2' has no attribute 'CascadeClassifier'
+```
+
+**原因**
+
+用 `pip install --system-site-packages .venv` 建立虛擬環境時，
+`ultralytics` 把 **opencv-python 5.0** 裝進 venv 裡，
+**蓋掉了系統原本的 OpenCV 4.10**。
+
+OpenCV 5.0 把 `CascadeClassifier` 等舊 API 搬走了，
+而 `face_core.py` 是照 4.10 寫的，於是人臉辨識整個掛掉。
+
+**解決**
+
+把 venv 裡那份 OpenCV 移除，靠 `--system-site-packages` 回到系統版本：
+
+```bash
+source .venv/bin/activate
+pip uninstall -y opencv-python
+python -c "import cv2; print(cv2.__version__, cv2.__file__)"
+```
+
+確認輸出的是系統路徑（`/usr/lib/python3/dist-packages/cv2...`）而不是
+`.../.venv/lib/python3.13/site-packages/cv2/`。
+
+ultralytics 只要求 opencv >= 4.6，4.10 完全夠用。
 
 ### 攝影機開不起來
 

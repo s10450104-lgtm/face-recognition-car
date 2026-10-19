@@ -42,7 +42,7 @@ import face_core
 import cv2
 import numpy as np
 
-from camera_source import open_camera
+from camera_source import apply_orientation, open_camera
 from face_core import (
     LOG_DIR,
     THRESHOLD_STRONG,
@@ -95,7 +95,7 @@ def run_recognition(cam, detector, recognizer, labels: list[str],
                 print("  [!] 影像讀取中斷")
                 break
 
-            frame = cv2.flip(frame, 1)       # 鏡像，符合使用者直觉
+            frame = apply_orientation(frame)   # 方向校正（鏡像/旋轉）統一在此處理
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             # ── 偵測 + 辨識 ──

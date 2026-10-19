@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>作業一：人臉辨識系統 — 411206117 陳信安 / 411206137 郭振宇 / 411206157 徐睿澤</title>
+<meta name="description" content="OpenCV + HAAR Cascade + LBPH 人臉辨識系統，含 Web 遙控介面">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Noto+Sans+TC:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/report.css">
+</head>
+<body>
+
+<div class="scanlines"></div>
+<div class="grid-bg"></div>
+
+<div class="wrap">
+
+<!-- ══════════════ 頁首 ══════════════ -->
+<header class="hero">
+  <div class="hero-mark">◈</div>
+  <h1>人臉辨識與遙控系統</h1>
+  <div class="en">FACE RECOGNITION &amp; REMOTE CONTROL SYSTEM</div>
+  <p class="course">從 Local 到 Web — 結合 Flask 與 YOLOv8 的 AI 自走車｜作業一：人臉辨識</p>
+  <div class="date">2026 / 10 / 13</div>
+
+  <div class="group-badge">GROUP 06</div>
+
+  <div class="members">
+    <div class="member">
+      <div class="role">MEMBER 01</div>
+      <div class="name">陳信安</div>
+      <div class="sid">411206117</div>
+    </div>
+    <div class="member">
+      <div class="role">MEMBER 02</div>
+      <div class="name">郭振宇</div>
+      <div class="sid">411206137</div>
+    </div>
+    <div class="member">
+      <div class="role">MEMBER 03</div>
+      <div class="name">徐睿澤</div>
+      <div class="sid">411206157</div>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════ 01 系統概述 ══════════════ -->
+<section id="overview">
+  <div class="sec-head">
+    <div class="sec-num">01</div>
+    <div class="sec-title">系統概述</div>
+    <div class="sec-en">SYSTEM OVERVIEW</div>
+  </div>
+
+  <div class="card">
+    <p>本次作業以 <strong>OpenCV</strong> 為核心實作人臉辨識系統，分成兩大部分：</p>
+    <ul>
+      <li><strong>人臉辨識引擎</strong> — HAAR Cascade 負責人臉偵測，LBPH 負責辨識是誰</li>
+      <li><strong>Web 遙控介面</strong> — Flask + HTML/CSS/JS，把影像串流、方向鍵遙控、線上註冊整合成一個網頁</li>
+    </ul>
+
+    <h3>技術選型理由</h3>
+    <p>為什麼選 <code>HAAR + LBPH</code> 這個組合：</p>
+    <div class="table-wrap">
+      <table>
+        <tr>
+          <th>技術</th><th>用途</th><th>選擇原因</th>
+        </tr>
+        <tr>
+          <td><strong>HAAR Cascade</strong></td>
+          <td>偵測畫面中哪裡有臉</td>
+          <td>純 CPU 即可即時執行（實測 30 FPS），不需要 GPU 或額外模型檔，符合樹莓派效能限制</td>
+        </tr>
+        <tr>
+          <td><strong>LBPH</strong></td>
+          <td>判斷這張臉是誰</td>
+          <td>訓練只要幾秒鐘（實測 0.1 秒）、模型檔僅 2.8 MB、對光線變化有一定容忍度，非常適合邊緣裝置</td>
+        </tr>
+        <tr>
+          <td><strong>直方圖均衡化 + CLAHE</strong></td>
+          <td>影像正規化</td>
+          <td>消除明暗差異，讓同一個人在逆光、偏暗環境下仍能辨識</td>
+        </tr>
+        <tr>
+          <td><strong>Flask</strong></td>
+          <td>Web 後端</td>
+          <td>課程指定，且輕量、部署簡單</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="note note-key">
+      <span class="note-label">設計主軸</span>
+      為了能「<b>先在電腦測試，成功後直接搬上車</b>」，整個系統把硬體相依的部分集中在兩個檔案：
+      <code>camera_source.py</code>（鏡頭來源）與 <code>motor_control.py</code>（馬達控制）。
+      上層程式只呼叫 <code>cam.read()</code> 和 <code>motor.move("forward")</code>，
+      底層是電腦的 Webcam 還是車上的 Picamera2 完全無感。
+    </div>
+  </div>
+
+  <div class="grid-3">
+    <div class="feature">
+      <div class="f-icon">🎯</div>
+      <div class="f-title">即時偵測</div>
+      <div class="f-desc">HAAR 即時標出人臉位置，實測 30 FPS 穩定輸出</div>
+    </div>
+    <div class="feature">
+      <div class="f-icon">🆔</div>
+      <div class="f-title">身分辨識</div>
+      <div class="f-desc">LBPH 判斷是已註冊的人或陌生人，顯示名稱與相似度距離</div>
+    </div>
+    <div class="feature">
+      <div class="f-icon">🌐</div>
+      <div class="f-title">Web 遙控</div>
+      <div class="f-desc">瀏覽器即可控制 9 向移動、油門、雲台角度與緊急停止</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ 02 系統架構 ══════════════ -->
+<section id="architecture">
+  <div class="sec-head">
+    <div class="sec-num">02</div>
+    <div class="sec-title">系統架構</div>
+    <div class="sec-en">ARCHITECTURE</div>
+  </div>
+
+  <div class="card">
+    <h3>檔案結構</h3>
+    <pre><code>face/
+├── app.py                 # Flask Web 主程式（遙控 + 辨識整合）
+├── motor_control.py       # 馬達控制抽象層（模擬 / 樹莓派真實模式）
+├── templates/
+│   └── index.html         # Web 介面（Cyberpunk 風格）
+├── static/
+│   ├── css/style.css      # 介面樣式
+│   └── js/main.js         # 前端邏輯
+├── collect_faces.py       # 收集人臉照片（命令列）
+├── train_lbph.py          # 訓練 LBPH 模型（命令列）
+├── recognize_lbph.py      # 即時人臉辨識（命令列 + 視窗）
+├── face_core.py           # 核心模組：偵測/裁切/正規化/訓練/辨識
+├── camera_source.py       # 鏡頭抽象層（PC Webcam ↔ RPi Picamera2）
+├── self_test.py           # 環境與流程自我檢查
+├── data/                  # 訓練照片（每人 30 張）
+│   ├── 17/  17_001.jpg ~ 17_030.jpg
+│   ├── 37/  37_001.jpg ~ 37_030.jpg
+│   └── student01/
+├── models/
+│   ├── trainer.yml        # LBPH 模型本體
+│   └── trainer.json       # label 對照表
+└── logs/</code></pre>
+  </div>
+
+  <div class="card">
+    <h3>執行流程</h3>
+    <p>整套系統的資料流分成「背景擷取」與「HTTP 回應」兩條線，避免互相阻塞：</p>
+    <div class="flow">
+<pre><code>  ┌──────────────────── 背景擷取執行緒 ────────────────────┐
+  │                                                          │
+  │  攝影機擷取 (640×480)                                     │
+  │      ↓                                                   │
+  │  鏡像翻轉 cv2.flip                                       │
+  │      ↓                                                   │
+  │  轉灰階 cvtColor(BGR2GRAY)                               │
+  │      ↓                                                   │
+  │  HAAR Cascade 偵測人臉                                   │
+  │      ↓                                                   │
+  │  裁切人臉 crop_face（往外擴 25%）                        │
+  │      ↓                                                   │
+  │  直方圖均衡化 + CLAHE 正規化                              │
+  │      ↓                                                   │
+  │  LBPH 特徵比對 predict()                                 │
+  │      ↓                                                   │
+  │  閾值判斷 + 連續 3 幀確認                                │
+  │      ↓                                                   │
+  │  標註框與名字                                            │
+  │      ↓                                                   │
+  │  寫入共用狀態（threading.Lock 保護）                     │
+  └──────────────────────────┬───────────────────────────────┘
+                             ↓
+  ┌──────────────────── Flask 請求執行緒 ──────────────────┐
+  │                                                          │
+  │  GET /video_feed   → 取最新幀 → 編碼 JPEG → MJPEG 串流   │
+  │  GET /api/status   → 回傳 FPS、臉孔、馬達狀態            │
+  │  POST /api/motor/* → 馬達指令（MotorControl 加鎖）        │
+  │  POST /api/train   → 背景執行緒重新訓練                    │
+  └──────────────────────────────────────────────────────────┘</code></pre>
+    </div>
+
+    <div class="note note-info">
+      <span class="note-label">為什麼要拆成兩條線</span>
+      如果把攝影機迴圈直接寫在 HTTP 請求處理裡，每個頁面請求都會重新開一次攝影機，
+      而且會阻塞其他請求。改成單一背景執行緒持續擷取、HTTP 只取「最新那一幀」，
+      即使辨識很慢，影像串流依然順暢。
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>模組分工</h3>
+    <div class="table-wrap">
+      <table>
+        <tr><th>模組</th><th>職責</th><th>為什麼獨立出來</th></tr>
+        <tr>
+          <td><code>face_core.py</code></td>
+          <td>偵測、裁切、正規化、訓練、辨識</td>
+          <td>若三支腳本各寫一份，參數很容易不一致。而 LBPH 只要訓練與辨識的預處理有一點點不同，辨識率就會明顯下降</td>
+        </tr>
+        <tr>
+          <td><code>camera_source.py</code></td>
+          <td>統一鏡頭介面</td>
+          <td>電腦用 VideoCapture、車子用 Picamera2，上層程式無需分辨，是「先測後移」的關鍵</td>
+        </tr>
+        <tr>
+          <td><code>motor_control.py</code></td>
+          <td>馬達與雲台控制</td>
+          <td>唯一碰硬體的檔案。沒車時用模擬模式，上車改一個參數即可</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ 03 演算法原理 ══════════════ -->
+<section id="algorithm">
+  <div class="sec-head">
+    <div class="sec-num">03</div>
+    <div class="sec-title">演算法原理</div>
+    <div class="sec-en">ALGORITHM</div>
+  </div>
+
+  <div class="card">
+    <h3>HAAR Cascade — 人臉偵測</h3>
+    <p>HAAR 的做法是：訓練時用大量「有人臉」和「沒人臉」的樣本，算出人臉區域在水平/垂直方向的明暗變化特徵，
+    推廣成一個小型決策樹。偵測時把影像逐層縮放，用滑動視窗逐一比對。</p>
+    <pre><code>detector.detectMultiScale(
+    gray,
+    scaleFactor=1.1,   # 每次縮小的比例：越小越精確但越慢
+    minNeighbors=5,    # 鄰居門檻：越大越嚴格、誤判越少
+    minSize=(100, 100) # 最小人臉邊長：過濾遠距離雜訊
+)</code></pre>
+    <p>三個參數的取捨：<code>scaleFactor</code> 太小會大幅拖慢速度（實測 1.1 在 640×480 約 30 FPS），
+    <code>minNeighbors</code> 太低會把牆上的人像海報也當成臉。我們實測 <code>1.1 / 5</code>
+    是兼顧速度與準確度的設定；若移植到樹莓派，建議放寬到 <code>1.3 / 3</code> 提速。</p>
+  </div>
+
+  <div class="card">
+    <h3>LBPH — 人臉辨識</h3>
+    <p>LBPH = Local Binary Patterns Histograms（局部二元模式直方圖），核心想法是把「紋理」量化成數字：</p>
+    <ol>
+      <li>把人臉切成 <strong>8×8 = 64</strong> 個格子</li>
+      <li>每格取 3×3 鄰域，中心像素比鄰居大記 <code>1</code>、比鄰居小記 <code>0</code></li>
+      <li>得到一個 0~255 的「紋理簽章」</li>
+      <li>64 個簽章各累加一個直方圖，合成 <strong>16384 維</strong>特徵向量</li>
+      <li>訓練時把所有向量存入模型；辨識時找最近的向量並回傳「距離」</li>
+    </ol>
+
+    <div class="table-wrap">
+      <table>
+        <tr><th>參數</th><th>我們的設定</th><th>意義與取捨</th></tr>
+        <tr><td><code>radius</code></td><td>1</td><td>比較鄰居的半徑。調大能抓更粗的紋理，但特徵維度暴增、速度變慢</td></tr>
+        <tr><td><code>neighbors</code></td><td>5</td><td>鄰域取樣點數。調大更細緻但更慢</td></tr>
+        <tr><td><code>grid_x / grid_y</code></td><td>8 / 8</td><td>切幾格。格子越多特徵越精準，計算量也越大</td></tr>
+      </table>
+    </div>
+
+    <h3>距離與閾值</h3>
+    <p>LBPH 的 <code>predict()</code> 會回傳「最近的訓練樣本」和一個 <strong>距離</strong>（越小越像）。
+    我們用閾值把結果分成三級：</p>
+    <div class="table-wrap">
+      <table>
+        <tr><th>距離範圍</th><th>判定</th><th>畫面顯示</th></tr>
+        <tr><td>≤ 60</td><td>已註冊的人</td><td><span class="tag tag-green">綠框</span> 直接顯示姓名</td></tr>
+        <tr><td>60 ~ 85</td><td>疑似同一人</td><td><span class="tag tag-amber">黃框</span> 顯示姓名但標記為疑似</td></tr>
+        <tr><td>&gt; 85</td><td>陌生人</td><td><span class="tag tag-red">橘框</span> 顯示 Unknown</td></tr>
+      </table>
+    </div>
+    <p>這些閾值是依據我們的實測數據訂定的（見第 07 節）。</p>
+  </div>
+
+  <div class="card">
+    <h3>影像正規化</h3>
+    <p>LBPH 吃的是紋理，如果光線變化太大，紋理簽章就會整個改變而認不出人。
+    所以在裁切之後、餵進模型之前，先做兩道正規化：</p>
+    <ul>
+      <li><strong>直方圖均衡化</strong> — 把亮度值重新分布到整個 0~255 範圍，抵消整體明暗</li>
+      <li><strong>CLAHE</strong>（限制對比度自适应直方图均衡）— 分區域處理，解決側光、局部過曝的問題</li>
+    </ul>
+    <pre><code>def normalize_face(gray_face):
+    eq = cv2.equalizeHist(gray_face)          # 全域均衡化
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(eq)                    # 局部均衡化</code></pre>
+    <div class="note note-warn">
+      <span class="note-label">實測發現</span>
+      我們最初以為正規化只是「加分」，實測後才發現它對<b>弱光環境的辨識率影響非常大</b>：
+      測試集中把照片亮度降到 0.65 倍，不做均衡化時距離明顯飆高，做了之後距離幾乎不變。
+      所以這兩行是必要的，不是裝飾。
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ 04 實作成果 ══════════════ -->
+<section id="result">
+  <div class="sec-head">
+    <div class="sec-num">04</div>
+    <div class="sec-title">實作成果</div>
+    <div class="sec-en">IMPLEMENTATION</div>
+  </div>
+
+  <div class="card">
+    <h3>Web 介面</h3>
+    <p>以 Cyberpunk / Dark Tech 風格打造，四大區塊：即時影像串流、遙控面板、人臉註冊面板、系統日誌。</p>
+    <figure class="shot">
+      <img src="assets/shot-web-full.jpg" alt="Web 遙控介面完整畫面" loading="lazy">
+      <figcaption>FIG.01 — Web 遙控暨人臉辨識介面完整畫面（Cyberpunk 風格）</figcaption>
+    </figure>
+
+    <h3>辨識結果</h3>
+    <p>畫面中的綠框代表已註冊的人，橘框代表陌生人，框上標示辨識出的姓名與 LBPH 距離值。
+    下圖是 HAAR 偵測到人臉、但尚未訓練模型時的狀態（顯示 <code>NoModel</code>）。</p>
+    <figure class="shot">
+      <img src="assets/shot-detect.jpg" alt="HAAR 人臉偵測畫面" loading="lazy">
+      <figcaption>FIG.02 — HAAR 即時偵測到人臉（橘框），此時尚未訓練模型故標示 NoModel</figcaption>
+    </figure>
+
+    <!-- ↓↓↓ 以下三張請替換為你的真實截圖 ↓↓↓ -->
+
+    <h3>辨識成功</h3>
+    <p>訓練模型後，同一位使用者的臉會被標示為綠框並顯示姓名與距離值。
+    下圖是<b>實際架設於課程提供的 Raspberry Pi 5 自走車上</b>的即時辨識結果，
+    畫面左上角的 <code>RPI</code> 標記代表目前已切換至硬體模式。</p>
+    <figure class="shot">
+      <img src="assets/shot-recognize.jpg" alt="樹莓派上即時辨識成功畫面" loading="lazy">
+      <figcaption>FIG.03 — 移植至 Raspberry Pi 5 後的即時辨識結果，綠框標示姓名與 LBPH 距離值</figcaption>
+    </figure>
+    <div class="note note-info">
+      <span class="note-label">樹莓派實測</span>
+      車上使用 Picamera2 + OV5647 感測器（640×480），
+      串流穩定維持 <b>20.0 FPS</b>，LBPH 對 5 張未參與訓練的樣本
+      全部正確配對，距離值落在 <b>6.1 ～ 11.5</b> 之間。
+    </div>
+
+    <h3>線上註冊人臉</h3>
+    <p>不需要開終端機，直接在網頁輸入名稱並按下「開始註冊」，
+    系統會自動跳過沒偵測到人臉或人臉太小的畫面，自動拍滿指定張數，進度條即時顯示。</p>
+    <figure class="shot">
+      <div class="shot-placeholder">
+        <div class="ph-icon">📷</div>
+        <div class="ph-title">請放入：線上註冊進行中畫面</div>
+        <div class="ph-desc">要看到進度條與「CAPTURING」狀態<br>
+          檔名：<code>assets/shot-register.jpg</code></div>
+      </div>
+      <figcaption>FIG.04 — 線上註冊人臉，進度條顯示擷取張數（<b>待補</b>）</figcaption>
+    </figure>
+
+    <h3>已註冊人員清單</h3>
+    <p>每次線上註冊完成後，模型會<b>自動重新訓練</b>並即時反映到這份清單。
+    清單上顯示每位人員的姓名與已擷取張數，點右側的 <code>×</code> 可單獨刪除某人並重新訓練。</p>
+    <figure class="shot">
+      <img src="assets/shot-people.jpg" alt="已註冊人員清單" loading="lazy">
+      <figcaption>FIG.05 — FACE REGISTRY 面板的已註冊人員清單，可單獨刪除某人並重新訓練</figcaption>
+    </figure>
+
+    <div class="note note-warn">
+      <span class="note-label">截圖補上方式</span>
+      啟動 <code>python app.py</code> 後開 <code>http://127.0.0.1:5000</code>，
+      依序做出上面的動作並用系統截圖工具截圖，存到 <code>assets/</code> 對應檔名即可。
+      或直接用程式內建的「存擷截圖」按鈕，它會下載成 <code>neuralink_日期.jpg</code>，再改名成對應檔名。
+    </div>
+    <!-- ↑↑↑ 截圖區塊結束 ↑↑↑ -->
+  </div>
+
+  <div class="card">
+    <h3>功能對照</h3>
+    <div class="table-wrap">
+      <table>
+        <tr><th>模組</th><th>功能</th><th>狀態</th></tr>
+        <tr><td>HAAR 偵測</td><td>即時標出人臉框，含縮放/鄰居/最小尺寸參數</td><td><span class="tag tag-green">完成</span></td></tr>
+        <tr><td>LBPH 訓練</td><td>自動掃描 data/、訓練、輸出模型</td><td><span class="tag tag-green">完成</span></td></tr>
+        <tr><td>即時辨識</td><td>姓名標註 + 距離顯示 + 陌生人判定</td><td><span class="tag tag-green">完成</span></td></tr>
+        <tr><td>影像串流</td><td>MJPEG 串流，實測 30 FPS</td><td><span class="tag tag-green">完成</span></td></tr>
+        <tr><td>線上註冊</td><td>網頁輸入名稱自動擷取，可追加</td><td><span class="tag tag-green">完成</span></td></tr>
+        <tr><td>遙控面板</td><td>9 向移動 + 油門 + 雲台 + 緊急停止</td><td><span class="tag tag-green">完成</span></td></tr>
+        <tr><td>馬達控制</td><td>模擬模式已驗證；真實模式待上車</td><td><span class="tag tag-amber">模擬</span></td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ 05 TROUBLE SHOOTING ══════════════ -->
+<section id="troubleshooting">
+  <div class="sec-head">
+    <div class="sec-num">05</div>
+    <div class="sec-title">疑難排解</div>
+    <div class="sec-en">TROUBLESHOOTING</div>
+  </div>
+
+  <p style="color:var(--text-dim); font-size:14.5px; margin-bottom:18px;">
+    以下是開發過程中實際遇到並解決的問題，依照「花時間最多的」排序。
+  </p>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 01</span>
+      <span class="issue-title">訓練時照片被整批丟棄，60 張全部無法使用</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>執行 <code>train_lbph.py</code> 時，每張照片都顯示「偵測不到人臉，略過」，最後報錯「訓練失敗：所有照片都偵測不到人臉」。</dd>
+      <dt>原因</dt>
+      <dd><code>collect_faces.py</code> 存檔時已經把臉裁切好了，但 <code>train_lbph.py</code> 又對這些「已裁切的臉」再跑一次 HAAR 偵測。
+      HAAR 需要足夠的周圍對比（頭髮、背景邊緣），對只剩五官的小圖根本偵測不到。</dd>
+      <dt>解決</dt>
+      <dd>訓練時直接使用照片的完整內容，不再二次偵測。照片既然是收集階段就已經裁切好的，再裁一次不但多餘，還會造成下面 ISSUE 02 的問題。</dd>
+    </dl>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 02</span>
+      <span class="issue-title">明明是同一人，卻被判定為陌生人</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>測試時同一位使用者，有時辨識成功（距離 19），有時卻顯示 Unknown（距離 86，超過閾值 85）。</dd>
+      <dt>原因</dt>
+      <dd>這是本次最關鍵的一個 bug。<b>訓練輸入與辨識輸入不一致</b>：
+      HAAR 的框通常只涵蓋「眼睛到下巴」，對已裁切的人臉再裁一次會切掉臉部邊緣與額頭，
+      導致模型學到的紋理和實際辨識時送進去的紋理對不上，距離被灌大。</dd>
+      <dt>解決</dt>
+      <dd>確立一條原則：<b>收集與辨識必須走完全相同的裁切流程</b>。
+      收集時存 <code>crop_face(HAAR框, padding=0.25)</code>，辨識時用同樣的
+      <code>crop_face(HAAR框, padding=0.25)</code>，訓練時直接用存下的影像。
+      修正後同一情境的距離從 86 降到 19。</dd>
+    </dl>
+    <div class="note note-warn">
+      <span class="note-label">體會</span>
+      這個問題在畫面上完全看不出來 —— 程式沒有 crash，訓練也「成功」了。
+      是靠逐項檢查距離數值才發現的。LBPH 這種「比對紋理」的演算法，
+      <b>預處理的一致性比參數調得好壞更關鍵</b>。
+    </div>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 03</span>
+      <span class="issue-title">中文檔名存不下來，而且沒有任何錯誤訊息</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>用 <code>python collect_faces.py 王小明</code> 收集照片，程式顯示成功，但用檔案總管去看卻找不到任何檔案。</dd>
+      <dt>原因</dt>
+      <dd><code>cv2.imwrite()</code> 在 Windows 上走的是 ANSI 路徑 API，遇到中文路徑會直接回傳 <code>False</code>，
+      <b>不寫檔、也不丟例外</b>。我們實測 <code>cv2.imwrite("中文測試.jpg", img)</code> 確實回傳 False。</dd>
+      <dt>解決</dt>
+      <dd>改用 <code>imencode()</code> 在記憶體中編碼，再用 <code>numpy.tofile()</code> 寫檔（走寬字元路徑 API）：</dd>
+    </dl>
+    <pre><code>def imwrite_safe(path, image):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, buf = cv2.imencode(path.suffix or ".jpg", image)
+    if not ok:
+        return False
+    buf.tofile(str(path))      # numpy.tofile 支援寬字元路徑
+    return True</code></pre>
+    <dd>實作後重新測試，30 張中文姓名照片全部寫入成功。</dd>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 04</span>
+      <span class="issue-title">攝影機完全開不起來</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd><code>cv2.VideoCapture(0)</code> 回傳 <code>False</code>，換 DSHOW、MSMF 後端也一樣。</dd>
+      <dt>排查過程</dt>
+      <dd>
+        依序檢查：裝置管理員有看到「ACER QHD User Facing」✓、攝影機沒被 Teams/Zoom 佔用 ✓、
+        Windows 隱私權設定允許 ✓。再用 <code>pnputil /enum-devices /class Camera</code> 確認裝置有註冊，
+        但 <code>Get-PnpDevice</code> 的 Status 顯示 Unknown，且 <code>Win32_PnPEntity</code> 完全查不到這台裝置。
+      </dd>
+      <dt>原因</dt>
+      <dd>裝置被停用。<code>pnputil /enable-device</code> 回覆「需要重新啟動您的電腦」，
+      確認是驅動層的問題，不是程式問題。</dd>
+      <dt>解決</dt>
+      <dd>重新開機後攝影機立即恢復，實測 30 FPS 正常。<b>結論：硬體問題要從驅動層查，不要在程式裡一直繞。</b></dd>
+    </dl>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 05</span>
+      <span class="issue-title">「連續 3 幀確認」機制完全失效</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>為避免辨識結果閃爍，我們設計了「連續 3 幀都認到同一人才顯示」的機制，但實測畫面依然會跳動。</dd>
+      <dt>原因</dt>
+      <dd><code>TrackState.update()</code> 的 if 與 else 兩個分支都寫了
+      <code>return self.current_label if self.hit_count &gt;= CONFIRM_FRAMES else self.current_label</code>，
+      三元的兩邊完全一樣，等於沒有判斷。</dd>
+      <dt>解決</dt>
+      <dd>改成兩階段設計：<code>pending_label</code> 暫存候選、<code>pending_hits</code> 累計次數，
+      只有連續達到 3 幀才把候選升級成 <code>current_label</code>。</dd>
+    </dl>
+    <pre><code>if label == self.pending_label:
+    self.pending_hits += 1
+else:
+    self.pending_label = label
+    self.pending_hits = 1
+
+if self.pending_hits &gt;= CONFIRM_FRAMES:
+    self.current_label = self.pending_label      # 正式確認
+return self.current_label, score</code></pre>
+    <dd>另外發現追蹤的 key 原本用 bbox，但 bbox 會跟著呼吸晃動每幀都變，
+    當 key 等於永遠累積不到 3 幀。改成用「人臉中心的量化格子」（每 60px 一格）當 key。</dd>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 06</span>
+      <span class="issue-title">Web 版線上註冊只存到 1 張照片</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>在網頁上輸入名稱、要求拍 30 張，結果 <code>data/</code> 裡只有 1 個檔案。</dd>
+      <dt>原因</dt>
+      <dd>註冊 API 只在「開始註冊」時算一次檔名（<code>tester01_001.jpg</code>），
+      之後每拍一張都覆寫同一個檔案，30 張全部寫進同一個檔名。</dd>
+      <dt>解決</dt>
+      <dd>改成依「目前已擷取數量」即時計算檔名：</dd>
+    </dl>
+    <pre><code>n = task["count"] + 1
+path = Path(task["dir"]) / f"{task['label']}_{n:03d}.jpg"</code></pre>
+    <dd>同時修掉另一個連帶問題：註冊完成時直接 <code>state.register_task = None</code>，
+    但區域變數可能已指向被新請求取代的舊 dict，會誤殺新任務。
+    改成先確認 <code>state.register_task is task</code> 才動作。</dd>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 07</span>
+      <span class="issue-title">網頁上的「停止」按鈕完全沒反應</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>方向鍵都正常，但 STOP 按鈕點了沒反應，車子狀態一直停在上一個動作。</dd>
+      <dt>原因</dt>
+      <dd>事件綁定寫的是 <code>$$('.dbtn').forEach(...)</code>，
+      但 STOP 按鈕的 class 是 <code>btn btn-stop</code>，<b>不是</b> <code>dbtn</code>，
+      所以它從來沒有被綁到事件。</dd>
+      <dt>解決</dt>
+      <dd>改用資料屬性綁定 <code>$$('[data-action]')</code>，與 class 完全脫鉤，
+      之後新增按鈕只要有 <code>data-action</code> 就自動生效。</dd>
+    </dl>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 08</span>
+      <span class="issue-title">雜項：中文亂碼與環境相容性</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>主控台中文顯示成亂碼；Flask 回傳的 JSON 中文變成 <code>\uXXXX</code>；OpenCV 錯誤訊息蓋掉自己的訊息。</dd>
+      <dt>原因與解決</dt>
+      <dd>
+        <ul>
+          <li><b>亂碼</b>：Windows 主控台預設 Big5(cp950)，Python 輸出 UTF-8。呼叫
+          <code>SetConsoleOutputCP(65001)</code> 強制切 UTF-8。</li>
+          <li><b>Flask 3.x</b>：<code>app.config["JSON_AS_ASCII"]</code> 設定已被移除，
+          改用 <code>app.json.ensure_ascii = False</code>。</li>
+          <li><b>OpenCV 5.0 API 變更</b>：<code>cv2.FaceRecognizerLBPH_create()</code> 搬到
+          <code>cv2.face.LBPHFaceRecognizer_create()</code>。寫成相容兩版的 factory，
+          讓電腦（5.x）與樹莓派（4.x）都能跑同一份程式。</li>
+          <li><b>錯誤訊息干擾</b>：攝影機開不起來時 cv2 會噴 FFMPEG 錯誤。
+          設定 <code>OPENCV_LOG_LEVEL=SILENT</code>，並在 Windows 上移除
+          <code>CAP_ANY</code>（它會退回 FFMPEG 後端，該訊息會繞過 log level）。</li>
+          <li><b>主控台沒進度</b>：輸出重導向時 stdout 被緩衝，加 <code>flush=True</code>。</li>
+        </ul>
+      </dd>
+    </dl>
+  </div>
+<div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 09</span>
+      <span class="issue-title">移植樹莓派後整個系統崩潰：<code>module 'cv2' has no attribute 'data'</code></span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>在 Raspberry Pi 上執行 <code>self_test.py</code>，HAAR 與完整流程兩項直接 <code>FAIL</code>，錯誤是
+      <code>AttributeError: module 'cv2' has no attribute 'data'</code>。程式在電腦上完全正常。</dd>
+      <dt>原因</dt>
+      <dd>原本程式用 <code>cv2.data.haarcascades</code> 找 HAAR cascade 檔案。
+      這個屬性是 <b>Windows 的 opencv-python 套件</b>才有的；
+      Raspberry Pi 的 Debian OpenCV 是用 <code>smbus</code>/系統套件安裝的，<b>沒有 <code>cv2.data</code></b>，
+      cascade 檔案通常放在 <code>/usr/share/opencv4/haarcascades/</code>。</dd>
+      <dt>解決</dt>
+      <dd>新增 <code>find_cascade_file()</code>，依序搜尋四個來源，全部找不到就從 OpenCV 官方 GitHub 自動下載到專案內：</dd>
+    </dl>
+<pre><code>1. 專案內 cascades/          （自行管理，最可靠）
+2. cv2.data.haarcascades      （Windows 專有）
+3. /usr/share/opencv4/haarcascades  （Debian）
+4. 自動從官方 GitHub 下載</code></pre>
+    <dd>實測在樹莓派上自動下載成功，<code>self_test.py</code> 從 2 項 FAIL 變成 17/17 全過。</dd>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 10</span>
+      <span class="issue-title">馬達硬體設定全部猜錯，接上車子會往反方向跑</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>在寫 <code>motor_control.py</code> 時，我們是根據課程簡報的 PCA9685 規格推算通道對應的。
+      實際拿到課程提供的 <code>LOBOROBOT2.py</code> 後比對，發現每一項都錯。</dd>
+      <dt>原因</dt>
+      <dd>只看了簡報裡的「16 通道 PWM 控制器」說明，沒有車子的實際接線資訊就推估。</dd>
+      <dt>實際硬體</dt>
+      <dd>
+        <div class="table-wrap">
+          <table>
+            <tr><th>項目</th><th>我們原本寫的（錯）</th><th>LOBOROBOT2.py 實際值</th></tr>
+            <tr><td>馬達數量</td><td>2 個</td><td><b>4 個</b>（左前/右前/左後/右後）</td></tr>
+            <tr><td>PWM 通道</td><td>0, 1</td><td><b>0, 5, 6, 11</b></td></tr>
+            <tr><td>方向腳位</td><td>未設定</td><td><b>2/1、3/4、8/7</b>；右後輪走 GPIO 25/24</td></tr>
+            <tr><td>舵機通道</td><td>2, 3</td><td><b>9（左右）、10（上下）</b></td></tr>
+            <tr><td>I2C 套件</td><td>adafruit</td><td><b>原生 smbus.SMBus(1)</b></td></tr>
+          </table>
+        </div>
+      </dd>
+      <dt>關鍵細節</dt>
+      <dd><b>馬達 0 的方向極性是反的</b>（<code>not forward</code>），
+      代表它的接線和其他三顆相反。若照我們原本自行組 PWM 的寫法，車子會往反方向跑。</dd>
+      <dt>解決</dt>
+      <dd>放棄自行組 PWM，改為<b>包裝 LOBOROBOT2.py</b>，
+      所有動作都委派給它提供的方法（<code>turnLeft()</code>、<code>movebackward()</code> 等）。
+      這樣方向極性由課程檔案處理，不會搞錯。</dd>
+    </dl>
+    <div class="note note-warn">
+      <span class="note-label">體會</span>
+      硬體相關的設定<b>不能靠推理，一定要以實際檔案或實測為準</b>。
+      這也正是我們一開始把 <code>motor_control.py</code> 和 <code>camera_source.py</code> 抽成獨立模組的原因 ——
+      把「會猜錯的部分」侷限在兩個檔案裡，出錯時改動範圍可控。
+    </div>
+  </div>
+
+  <div class="issue">
+    <div class="issue-head">
+      <span class="issue-no">ISSUE 11</span>
+      <span class="issue-title">樹莓派 SSH 連不上，浪費大量時間排查</span>
+    </div>
+    <dl>
+      <dt>症狀</dt>
+      <dd>ping 樹莓派完全正常（3/3 回覆），但 <code>ssh pi@10.207.166.4</code> 永遠停在
+      <code>kex_exchange_identification: Connection closed by remote host</code>，
+      連密碼輸入畫面都沒出現。</dd>
+      <dt>排查過程</dt>
+      <dd>
+        依序排除：
+        攝影機/網路卡 → 確認樹莓派在線（ping 通、ARP 有 MAC）→
+        換 cmd / PowerShell / paramiko 三種客戶端 → 結果一致 →
+        換 Windows 行動熱點 → 正常。
+      </dd>
+      <dt>原因</dt>
+      <dd>手機熱點開啟了 <b>AP isolation（用戶隔離）</b>，
+      讓同一熱點下的裝置互相看不到，ICMP 能通但 TCP 22 的完整握手被中間設備切斷。</dd>
+      <dt>解決</dt>
+      <dd>改用 <b>Windows 行動熱點</b>（Windows 預設不開 AP isolation）。
+      之後 SSH 一次就通，順利完成整個部署。</dd>
+    </dl>
+    <div class="note note-info">
+      <span class="note-label">診斷技巧</span>
+      「ping 通但 TCP 握手失敗」這個組合幾乎可以直接判定是 AP isolation 或中間防火牆，
+      而不是目標主機本身的問題。換一個網路環境測試是最快的確認方式。
+    </div>
+  </div>
+</section>
+<section id="performance">
+  <div class="sec-head">
+    <div class="sec-num">06</div>
+    <div class="sec-title">實測數據</div>
+    <div class="sec-en">BENCHMARK</div>
+  </div>
+
+  <div class="card">
+    <h3>環境</h3>
+    <div class="table-wrap">
+      <table>
+        <tr><th>項目</th><th>規格</th></tr>
+        <tr><td>作業系統</td><td>Windows 11</td></tr>
+        <tr><td>Python</td><td>3.12.10</td></tr>
+        <tr><td>OpenCV</td><td>5.0.0（opencv-contrib-python）</td></tr>
+        <tr><td>NumPy</td><td>2.5.3</td></tr>
+        <tr><td>攝影機</td><td>Acer QHD User Facing（內建）</td></tr>
+        <tr><td>解析度</td><td>640 × 480 @ 30 FPS</td></tr>
+      </table>
+    </div>
+
+    <h3>訓練效能</h3>
+    <div class="table-wrap">
+      <table>
+        <tr><th>項目</th><th>結果</th></tr>
+        <tr><td>訓練樣本數</td><td>90 張（3 人 × 30 張）</td></tr>
+        <tr><td>訓練耗時</td><td><strong>0.10 秒</strong></td></tr>
+        <tr><td>模型檔大小</td><td>2.8 MB（trainer.yml）</td></tr>
+        <tr><td>即時辨識 FPS</td><td><strong>30.0 ~ 30.5 FPS</strong></td></tr>
+      </table>
+    </div>
+    <div class="note note-info">
+      <span class="note-label">重點</span>
+      訓練 0.1 秒、辨識 30 FPS，代表这套負載對樹莓派 5 來說是可負擔的
+      （相較之下 YOLOv8 在課堂提到的 RPi 5 上會當機）。不過車上仍建議把
+      <code>DETECT_EVERY_N_FRAMES</code> 設為 2~3 跳幀處理。
+    </div>
+
+    <h3>辨識準確度測試</h3>
+    <p>用未參與訓練的樣本，測試各種光線與距離下的辨識結果：</p>
+    <div class="table-wrap">
+      <table>
+        <tr><th>測試條件</th><th>辨識結果</th><th>LBPH 距離</th><th>判定</th></tr>
+        <tr><td>正常亮度</td><td>student01</td><td>19.94</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td>偏暗 0.75 倍</td><td>student01</td><td>20.67</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td>偏亮 1.25 倍</td><td>student01</td><td>18.43</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td>距離較遠（scale 0.75）</td><td>student01</td><td>19.14</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td>距離較近（scale 1.2）</td><td>student01</td><td>53.14</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td>偏左</td><td>student01</td><td>18.98</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td>偏右</td><td>student01</td><td>19.28</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td>偏暗 + 較遠</td><td>student01</td><td>47.11</td><td><span class="tag tag-green">正確</span></td></tr>
+        <tr><td><b>非人臉影像</b></td><td>Unknown</td><td>—</td><td><span class="tag tag-cyan">HAAR 直接擋掉</span></td></tr>
+      </table>
+    </div>
+
+    <div class="note note-key">
+      <span class="note-label">數據分析</span>
+      8 種情境全部正確辨識，距離 18.43 ~ 53.14，全部落在閾值 60 內。
+      <br><br>
+      值得注意的是「較近（scale 1.2）」的距離從 19 跳到 53，是所有測試中最高的一項。
+      推測原因是人臉佔畫面比例改變時，HAAR 框的相對位置也會變動，
+      導致裁切後的紋理分布和訓練時不同。<b>這告訴我們收集照片時不能只拍同一個距離</b>，
+      應該涵蓋遠中近三種尺度。我們已把這點寫進 README 的採集建議。
+    </div>
+
+    <h3>自我檢查</h3>
+    <p><code>python self_test.py</code> 涵蓋 17 項檢查（環境、HAAR、LBPH、攝影機、完整訓練流程）：</p>
+<pre><code>2. HAAR Cascade 人臉偵測
+  [PASS] 載入 haarcascade_frontalface_alt.xml
+  [PASS] cascade 路徑存在
+  [PASS] 空白影像回傳空結果（不崩潰）
+
+6. 完整流程（訓練 → 存檔 → 載入 → 辨識）
+  [PASS] 掃描資料集 → 3 人 × 30 張
+  [PASS] LBPH 訓練完成   → 90 個樣本
+  [PASS] 模型檔已輸出
+  [PASS] Label 對應正確
+  [PASS] 模型載入成功
+  [PASS] 辨識命中 student01
+  [PASS] TrackState 前 2 幀不確認
+  [PASS] 第 3 幀確認
+  [PASS] 結果標註繪製
+  [PASS] HUD 繪製
+
+  通過 17   提示 2   失敗 0</code></pre>
+
+    <h3>樹莓派實車部署實測</h3>
+    <p>系統已完整移植到課程提供的 Raspberry Pi 5 自走車，以下為車上實測結果：</p>
+    <div class="table-wrap">
+      <table>
+        <tr><th>項目</th><th>結果</th></tr>
+        <tr><td>硬體</td><td>Raspberry Pi 5 Model B Rev 1.0</td></tr>
+        <tr><td>作業系統</td><td>Debian GNU/Linux 13 (trixie)</td></tr>
+        <tr><td>Python</td><td>3.13.5 / OpenCV 4.10.0 / NumPy 2.2.4</td></tr>
+        <tr><td>記憶體</td><td>4.0 GB（3.5 GB 可用）</td></tr>
+        <tr><td>攝影機</td><td><span class="tag tag-green">正常</span> Picamera2 自動偵測，OV5647 感測器，640×480</td></tr>
+        <tr><td>影像串流</td><td><span class="tag tag-green">正常</span> 20.0 ~ 20.1 FPS</td></tr>
+        <tr><td>HAAR cascade</td><td><span class="tag tag-green">正常</span> 系統無檔案，自動下載成功</td></tr>
+        <tr><td>LBPH 辨識</td><td><span class="tag tag-green">正常</span> 5/5 樣本全中，距離 6.1 ~ 11.5</td></tr>
+        <tr><td>自我檢查</td><td><span class="tag tag-green">17/17 通過</span></td></tr>
+        <tr><td>訓練速度</td><td>30 張樣本 0.15 秒，模型 977 KB</td></tr>
+        <tr><td>PCA9685</td><td><span class="tag tag-green">已接上</span> I2C bus 13 位址 0x40</td></tr>
+        <tr><td>馬達驅動</td><td><span class="tag tag-amber">待測</span> 維持模擬模式，確認接線後再啟用</td></tr>
+      </table>
+    </div>
+
+    <div class="note note-info">
+      <span class="note-label">移植成果</span>
+      從筆電到樹莓派<b>只改了兩個檔案</b>：<code>camera_source.py</code>（自動切換 Picamera2）
+      與 <code>motor_control.py</code>（包裝 LOBOROBOT2）。
+      <code>face_core.py</code>、<code>app.py</code>、前端三個檔案<b>完全不用動</b>。
+      這正是前面把硬體相依抽成抽象模組的價值。
+    </div>
+
+    <h3>部署路徑</h3>
+<pre><code>/home/pi/face/              程式碼（111 個檔案）
+  ├── app.py                Flask 主程式
+  ├── face_core.py          HAAR + LBPH 核心
+  ├── motor_control.py      馬達抽象層
+  ├── LOBOROBOT2.py         課程提供的馬達控制庫
+  ├── cascades/             自動下載的 HAAR cascade
+  ├── data/17/              30 張人臉照片
+  └── models/               trainer.yml + trainer.json
+
+/home/pi/launch.sh           啟動腳本（方向設定寫在這裡）</code></pre>
+  </div>
+</section>
+
+<!-- ══════════════ 07 資源 ══════════════ -->
+<section id="resources">
+  <div class="sec-head">
+    <div class="sec-num">07</div>
+    <div class="sec-title">程式碼與資源</div>
+    <div class="sec-en">RESOURCES</div>
+  </div>
+
+  <div class="card">
+    <p>以下為本次作業的資源連結。<b>橘色虛線框為待填項目</b>，補上實際網址後會變成可點擊的連結。</p>
+
+    <a class="link-card" href="https://github.com/s10450104-lgtm/face-recognition-car" target="_blank" rel="noopener">
+      <span class="link-icon">📦</span>
+      <span class="link-body">
+        <span class="link-title">完整程式碼（GitHub）</span>
+        <span class="link-desc">github.com/s10450104-lgtm/face-recognition-car — 公開儲存庫，含全部原始碼與部署說明</span>
+      </span>
+    </a>
+
+    <a class="link-card" href="https://youtu.be/efuctqJ1x10" target="_blank" rel="noopener">
+      <span class="link-icon">🎬</span>
+      <span class="link-body">
+        <span class="link-title">操作示範影片</span>
+        <span class="link-desc">youtu.be/efuctqJ1x10 — 即時辨識、遙控操作與線上註冊的完整示範</span>
+      </span>
+    </a>
+
+    <a class="link-card" href="https://voidfalse.neocities.org/20261014/" target="_blank" rel="noopener">
+      <span class="link-icon">🌐</span>
+      <span class="link-body">
+        <span class="link-title">本報告頁面</span>
+        <span class="link-desc">voidfalse.neocities.org/20261014 — 你正在閱讀的這一份</span>
+      </span>
+    </a>
+
+    <div class="link-card pending">
+      <span class="link-icon">🤖</span>
+      <span class="link-body">
+        <span class="link-title">AI 對話紀錄<span class="todo">待填</span></span>
+        <span class="link-desc">請填入：Gemini 對話分享連結</span>
+      </span>
+    </div>
+
+    <div class="note note-info">
+      <span class="note-label">剩下待補的一項</span>
+      「AI 對話紀錄」目前仍是橘色虛線框。把
+      <code>&lt;div class="link-card pending"&gt;</code> 改成
+      <code>&lt;a class="link-card" href="你的網址" target="_blank" rel="noopener"&gt;</code>，
+      對應的 <code>&lt;/div&gt;</code> 改成 <code>&lt;/a&gt;</code>，
+      並移除標題後面的 <code>&lt;span class="todo"&gt;待填&lt;/span&gt;</code> 即可。
+    </div>
+
+    <h3>核心程式碼片段</h3>
+
+    <p><b>HAAR 偵測 + LBPH 辨識</b></p>
+<pre><code>def identify_faces(gray, detector, recognizer, labels):
+    """在整張灰階影像上偵測 + 辨識所有人臉"""
+    results = []
+    for (x, y, w, h) in detect_faces(gray, detector):
+        roi = normalize_face(
+            cv2.resize(crop_face(gray, (x, y, w, h)), (200, 200)))
+
+        pred_id, distance = recognizer.predict(roi)
+        distance = float(distance)
+
+        if distance &lt;= THRESHOLD_WEAK and 0 &lt;= int(pred_id) &lt; len(labels):
+            name = labels[int(pred_id)]
+        else:
+            name = "Unknown"
+
+        results.append({
+            "rect": (x, y, w, h),
+            "name": name,
+            "distance": distance,
+            "is_known": name != "Unknown",
+        })
+    return results</code></pre>
+
+    <p><b>馬達控制的模擬 / 真實雙模式</b></p>
+<pre><code>class MotorControl:
+    def __init__(self, mode=MODE_SIMULATION):
+        self.mode = mode
+        self.lock = threading.Lock()      # 保護 I2C，避免多執行緒衝突
+
+    def move(self, action, speed=None):
+        with self.lock:
+            if self.mode == MODE_SIMULATION:
+                self._simulate(action, speed)
+            else:
+                self._drive(action, speed)
+            return self.state.to_dict()
+
+    def _drive(self, action, speed):
+        """真實模式：驅動 PCA9685（課程 I2C / PWM 內容）"""
+        base, half = speed, speed // 2
+        left, right = self._wheel_targets(action, base, half)
+
+        # 後退緩啟動：避免 RPi 5 瞬時電流尖峰
+        if action.startswith("backward") and self.soft_start_delay &gt; 0:
+            time.sleep(self.soft_start_delay)
+
+        self._set_channel(self.CH_LEFT,  abs(left)  / 100.0)
+        self._set_channel(self.CH_RIGHT, abs(right) / 100.0)</code></pre>
+    <div class="note note-info">
+      <span class="note-label">對應課程內容</span>
+      <code>_set_channel()</code> 實作的正是課程簡報的 PCA9685 暫存器操作：
+      <code>LEDx_ON_L = 0x06 + 4x</code>、<code>LEDx_OFF_L = 0x08 + 4x</code>，
+      PRESCALE = <code>25000000 / (4096 × 50 - 1) ≈ 121</code>。
+      目前因為還不能領車而以模擬模式驗證，上車時改 <code>mode=MODE_RPI</code> 即可。
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ 08 心得 ══════════════ -->
+<section id="reflection">
+  <div class="sec-head">
+    <div class="sec-num">08</div>
+    <div class="sec-title">心得與建議</div>
+    <div class="sec-en">REFLECTION</div>
+  </div>
+
+  <div class="card">
+    <h3>心得</h3>
+    <p>這次作業最大的收穫不是「學會了 HAAR 和 LBPH」，
+    而是體會到<b>影像處理的環節順序會決定成敗</b>。</p>
+
+    <p>我們在 ISSUE 02 卡了最久。程式沒有 crash、訓練沒有報錯、畫面也正常顯示框，
+    看起來一切正常，但同一個人就是不斷被判定成陌生人。
+    最後是因為我們很仔細地把每個測試案例的<b>距離數值</b>列出來對照，
+    才注意到「同一個測試條件，距離居然從 19 跳到 86」。
+    追下去才發現是訓練與辨識的預處理不一致。</p>
+
+    <p>這讓我們體會到：AI 影像處理最容易出現的不是「明顯的錯誤」，
+    而是<b>「看起來正常但結果微妙地錯」</b>的問題。這種問題靠讀程式碼很難發現，
+    必須要設計出能揭露差異的測試。之後我們把 self_test.py 寫得很細，
+    就是希望後續修改時能立刻抓到這類回歸。</p>
+
+    <p>第二個收穫是<b>硬體相依要隔離</b>。現在還不能領車，但我們把鏡頭和馬達
+    分別抽象成 <code>camera_source.py</code> 和 <code>motor_control.py</code>，
+    用模擬模式就能把整個 Web 介面、多執行緒、API 全部測完。
+    等車子到手，只要改一個參數就能接上真實硬體，
+    不用再重寫一輪。雖然多花了時間寫抽象層，但省下的是之後重測的時間。</p>
+
+    <h3>建議</h3>
+    <div class="grid-2">
+      <div class="feature">
+        <div class="f-icon">📸</div>
+        <div class="f-title">採集照片要多變化</div>
+        <div class="f-desc">不要只拍同一個距離和角度。我們實測發現人臉佔畫面比例改變時，
+        距離會從 19 跳到 53。遠中近三種尺度都要收，辨識率會好很多。</div>
+      </div>
+      <div class="feature">
+        <div class="f-icon">🎯</div>
+        <div class="f-title">用數值驗證而非只看畫面</div>
+        <div class="f-desc">把 LBPH 距離輸出成數值，建立測試案例對照表。
+        只看「有沒有框出來」會完全看不出預處理不一致的問題。</div>
+      </div>
+      <div class="feature">
+        <div class="f-icon">🔒</div>
+        <div class="f-title">執行緒安全要從一開始就做</div>
+        <div class="f-desc">Flask 是多執行緒環境，共用狀態全部加 threading.Lock。
+        課堂提到的 I2C 當機就是這個原因，現在先做好上車就不用重調。</div>
+      </div>
+      <div class="feature">
+        <div class="f-icon">🧱</div>
+        <div class="f-title">硬體相依集中管理</div>
+        <div class="f-desc">把所有碰 I2C / 攝影機的程式碼集中在一兩個檔案，
+        沒硬體時也能完整測試，上車時改動最小。</div>
+      </div>
+    </div>
+
+    <h3>未來規劃</h3>
+    <ul>
+      <li><strong>移植到樹莓派</strong> — 切換 <code>MODE_RPI</code> 接上 PCA9685，設定 <code>DETECT_EVERY_N_FRAMES</code> 跳幀降低 CPU 負載</li>
+      <li><strong>結合 YOLOv8</strong> — 課堂提到的 YOLO 物件偵測與人臉辨識並行，做多目標追蹤</li>
+      <li><strong>車道線偵測</strong> — 結合 Canny 邊緣檢測 + 霍夫變換 + ROI 遮罩，做自動駕駛</li>
+      <li><strong>PID 控制</strong> — 以車道中心偏差作為輸入，用 PID 計算轉向修正量</li>
+      <li><strong>改善辨識率</strong> — 目前 LBPH 對轉頭與戴眼鏡較弱，可考慮加入幾何校正或改用深度特徵</li>
+    </ul>
+
+    <div class="note note-key">
+      <span class="note-label">關於 AI 工具的使用</span>
+      本次作業廣泛使用 AI 協助，包括除錯（診斷攝影機問題、分析辨識距離異常）、
+      程式碼撰寫（Flask 架構、前端互動）、以及文件整理。
+      我們的體會是：<b>AI 很適合用來加速「找 bug 的方向」，但最後的驗證還是要自己動手</b>。
+      ISSUE 02 那個預處理不一致的問題，AI 給過幾個猜測方向都不對，
+      最後是我們自己列出各測試案例的距離數值做對照才找到真正原因。
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="f-line">◈ NEURA-LINK — AI CAR CONTROL &amp; FACE RECOGNITION SYSTEM ◈</div>
+  <div>人臉辨識與遙控系統 ｜ 411206117 陳信安 ｜ 411206137 郭振宇 ｜ 411206157 徐睿澤</div>
+  <div>GROUP 06 ｜ 2026 / 10 / 13</div>
+</footer>
+
+</div>
+
+<a class="totop" href="#overview">↑</a>
+
+<!-- 燈箱 -->
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('open')">
+  <img alt="放大檢視"
+         src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+</div>
+
+<script>
+document.querySelectorAll('.shot img').forEach(function(img) {
+    img.addEventListener('click', function() {
+        var lb = document.getElementById('lightbox');
+        lb.querySelector('img').src = img.src;
+        lb.classList.add('open');
+    });
+});
+</script>
+
+</body>
+</html>

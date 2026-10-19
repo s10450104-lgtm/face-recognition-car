@@ -44,6 +44,7 @@ import face_core as fc
 from camera_source import open_camera
 from motor_control import (ACTIONS, MODE_RPI, MODE_SIMULATION,
                            MotorControl)
+from yolo_detector import YoloDetector, is_available as yolo_available
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -84,6 +85,12 @@ class SystemState:
         # 註冊任務
         self.register_task: dict | None = None
 
+        # YOLO 物件偵測（由獨立背景執行緒更新，這裡只讀）
+        self.ai_results: list[dict] = []
+        self.ai_enabled = False
+        self.ai_error: str | None = None
+        self.ai_thread: threading.Thread | None = None
+
         # 執行緒
         self.running = False
         self.thread: threading.Thread | None = None
@@ -109,6 +116,31 @@ CAMERA_INDEX = 0
 STREAM_WIDTH = 640
 STREAM_HEIGHT = 480
 DETECT_EVERY_N_FRAMES = 1      # 每 N 幀辨識一次；車上建議 2~3
+
+# ── YOLO 物件偵測 ──────────────────────────────────────────
+# 樹莓派上 YOLOv8n 推論要 90ms 以上，若直接塞進串流迴圈會把
+# 影像串流拖到 5 FPS 以下。所以改成獨立背景執行緒推論，
+# 串流迴圈只負責把結果畫上去，兩者用 state 交換資料。
+#
+# 想在沒有安裝 ultralytics 的機器上執行，可以設成 False。
+YOLO_ENABLED = True
+YOLO_IMGSZ = 320              # 實測 640→5 FPS、320→11 FPS
+YOLO_CONF = 0.30
+YOLO_SKIP_FRAMES = 3          # 每 3 幀推論一次，中間沿用上次的結果
+
+# YOLO 偵測器（單一實例，供背景執行緒與繪圖共用）
+yolo = YoloDetector(imgsz=YOLO_IMGSZ,
+                    conf=YOLO_CONF,
+                    skip_frames=YOLO_SKIP_FRAMES)
+
+# 串流畫面用的框線配色（BGR）
+_AI_COLORS = {
+    "person": (0, 255, 255),     # 黃
+    "bicycle": (255, 0, 255),    # 紫紅
+    "car": (255, 180, 0),        # 藍
+    "motorcycle": (0, 255, 100), # 綠
+    "bus": (0, 200, 255),        # 橘
+}
 
 
 # ============================================================
@@ -149,7 +181,8 @@ def capture_loop():
                 time.sleep(1)
                 continue
 
-            frame = cv2.flip(frame, 1)        # 鏡像
+            # 方向校正已由 camera_source.apply_orientation() 統一處理，
+            # 這裡不要再 flip，否則會翻兩次
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             # ── 註冊模式：只擷取不辨識 ──
@@ -226,6 +259,7 @@ def capture_loop():
 
                 vis = frame.copy()
                 vis = fc.draw_result(vis, results)
+                vis = _draw_ai(vis)
                 vis = fc.draw_hud(
                     vis, "FACE RECOGNITION",
                     f"{len(labels)} registered" if labels else "no model")
@@ -244,6 +278,104 @@ def capture_loop():
     if cam is not None:
         cam.release()
     print("[capture] 擷取執行緒已停止")
+
+
+def _draw_ai(vis: np.ndarray) -> np.ndarray:
+    """
+    把 YOLO 的偵測結果畫到串流畫面上。
+
+    結果是從 state.ai_results 讀的（由 yolo_loop 背景執行緒更新），
+    所以這裡只是單純畫線，不會拖慢串流。
+    """
+    if not YOLO_ENABLED:
+        return vis
+
+    with state.lock:
+        detections = list(state.ai_results)
+
+    if not detections:
+        return vis
+
+    # 直接餵給 YoloDetector.draw()，但它會用 detector 內部的
+    # results 而不是我們手上的 detections，所以改成手動畫。
+    for d in detections:
+        x1, y1, x2, y2 = d["rect"]
+        color = _AI_COLORS.get(d["class"], (0, 255, 255))
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+
+        label = f"{d['cn']} {d['conf']:.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
+                                      0.45, 2)
+        ty = y1 - 6 if y1 - th - 10 > 0 else y1 + th + 8
+        cv2.rectangle(vis, (x1, ty - th - 6), (x1 + tw + 8, ty + 4),
+                      color, -1)
+        cv2.putText(vis, label, (x1 + 4, ty - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (20, 20, 20), 2,
+                    cv2.LINE_AA)
+
+    return vis
+
+
+def yolo_loop():
+    """
+    背景執行緒：讀取共用畫面 → YOLO 推論 → 寫回 state.ai_results
+
+    為什麼要獨立一個執行緒？
+    ----------------------
+    樹莓派上 YOLOv8n 單次推論要 90ms 以上。如果在 capture_loop
+    裡同步推論，影像串流會直接掉到 5 FPS 以下（實測）。
+    拆成獨立執行緒後，串流維持 20 FPS，推論在旁邊慢慢跑，
+    前端透過 /api/ai_status 另外抓結果（簡報建議的
+    「非同步狀態更新」）。
+
+    推論結果不是即時的：最多落後 skip_frames 幀，
+    對「畫面上有偵測到什麼」這種需求完全夠用。
+    """
+    print("[yolo-loop] 啟動 YOLO 背景執行緒…")
+
+    if not YOLO_ENABLED:
+        state.ai_error = "已停用（YOLO_ENABLED = False）"
+        print("[yolo-loop] YOLO 已停用")
+        return
+
+    if not yolo_available():
+        state.ai_error = yolo.load_error or "尚未安裝 ultralytics"
+        print(f"[yolo-loop] 環境不具備：{state.ai_error}")
+        return
+
+    if not yolo.load():
+        state.ai_error = yolo.load_error
+        print("[yolo-loop] 模型載入失敗，改為停用")
+        return
+
+    with state.lock:
+        state.ai_enabled = True
+        state.ai_error = None
+
+    n = 0
+    while state.running:
+        try:
+            with state.lock:
+                frame = state.raw_frame
+
+            if frame is None:
+                time.sleep(0.1)
+                continue
+
+            n += 1
+            # tick() 內部會依 skip_frames 判斷要不要真的推論
+            detections = yolo.tick(frame)
+
+            with state.lock:
+                state.ai_results = detections
+
+        except Exception as e:
+            print(f"[yolo-loop] 例外：{type(e).__name__}: {e}")
+            time.sleep(0.5)
+
+    with state.lock:
+        state.ai_enabled = False
+    print("[yolo-loop] 已停止")
 
 
 def _publish(vis: np.ndarray, raw: np.ndarray, results: list[dict],
@@ -265,20 +397,30 @@ def _publish(vis: np.ndarray, raw: np.ndarray, results: list[dict],
 
 
 def start_capture():
-    """啟動背景擷取執行緒（冪等）。"""
+    """啟動背景擷取執行緒與 YOLO 執行緒（冪等）。"""
     if state.thread and state.thread.is_alive():
         return
     state.running = True
+
     state.thread = threading.Thread(target=capture_loop, daemon=True,
                                     name="capture")
     state.thread.start()
 
+    # YOLO 背景執行緒獨立啟動。模型載入要一點時間，
+    # 不能擋住串流，所以這邊不 join。
+    if state.ai_thread is None or not state.ai_thread.is_alive():
+        state.ai_thread = threading.Thread(target=yolo_loop, daemon=True,
+                                           name="yolo")
+        state.ai_thread.start()
+
 
 def stop_capture():
-    """停止背景擷取執行緒。"""
+    """停止背景執行緒。"""
     state.running = False
     if state.thread:
         state.thread.join(timeout=3)
+    if state.ai_thread:
+        state.ai_thread.join(timeout=3)
 
 
 # ============================================================
@@ -380,7 +522,33 @@ def api_status():
             ),
         }
     payload["motor"] = motor.state.to_dict()
+
+    # YOLO 物件偵測狀態（前端單獨顯示）
+    payload["ai"] = {
+        "enabled": state.ai_enabled,
+        "error": state.ai_error,
+        "count": len(state.ai_results),
+        "imgsz": YOLO_IMGSZ,
+        "skip_frames": YOLO_SKIP_FRAMES,
+    }
     return jsonify(payload)
+
+
+@app.route("/api/ai_status")
+def api_ai_status():
+    """
+    YOLO 物件偵測的詳細狀態。
+
+    刻意跟 /api/status 分開：推論結果變動較慢，
+    前端不需要每秒重抓一次全部資料。
+    """
+    data = yolo.status()
+    with state.lock:
+        data["thread_running"] = bool(state.ai_thread
+                                       and state.ai_thread.is_alive())
+        data["detections"] = list(state.ai_results)
+        data["count"] = len(state.ai_results)
+    return jsonify(data)
 
 
 # ============================================================
