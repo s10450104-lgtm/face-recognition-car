@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -61,6 +62,127 @@ ACTION_LABELS = {
 }
 
 
+# ────────────────────────────────────────────────────────────────
+#  I2C bus 自動偵測
+# ────────────────────────────────────────────────────────────────
+#  課程提供的 LOBOROBOT2.py 第 22 行寫死了：
+#
+#       self.bus = smbus.SMBus(1)
+#
+#  但 Raspberry Pi 5 上 I2C 裝置的編號不一定是 1。
+#  實測這台車的 PCA9685 掛在 /dev/i2c-13，/dev/i2c-1 根本不存在，
+#  直接跑會出現 FileNotFoundError。
+#
+#  底下提供兩個工具：
+#    1. find_i2c_bus()          掃描所有 bus，找出 0x40 有回應的那條
+#    2. redirected_smbus()      建構 LOBOROBOT 的當下，把 SMBus(1) 換掉
+#
+#  這樣完全不用改動課程提供的 LOBOROBOT2.py，
+#  換一台車、bus 編號不同也一樣能跑。
+
+PCA9685_ADDRESS = 0x40
+
+
+def _available_i2c_buses() -> list[int]:
+    """列出系統上存在的 I2C bus 編號。"""
+    import glob
+    import re
+
+    nums = []
+    for path in glob.glob("/dev/i2c-*"):
+        m = re.search(r"/dev/i2c-(\d+)$", path)
+        if m:
+            nums.append(int(m.group(1)))
+    return sorted(nums)
+
+
+def find_i2c_bus(address: int = PCA9685_ADDRESS,
+                 probe: Optional[int] = None) -> tuple[Optional[int], str]:
+    """
+    找出接有 PCA9685 的 I2C bus。
+
+    參數
+    ----
+    address : int，PCA9685 的 I2C 位址（預設 0x40）
+    probe   : int | None，若指定則只試這一條 bus（不做掃描）
+
+    回傳
+    ----
+    (bus 編號 | None, 說明文字)
+    """
+    # 環境變數優先，讓使用者可以手動指定
+    import os
+    env = os.environ.get("I2C_BUS", "").strip()
+    if env.isdigit():
+        n = int(env)
+        return n, f"使用環境變數 I2C_BUS={n}"
+
+    if probe is not None:
+        buses = [probe]
+    else:
+        buses = _available_i2c_buses()
+        if not buses:
+            return None, ("系統上找不到任何 /dev/i2c-* 裝置。"
+                          "請用 sudo raspi-config 開啟 I2C 後重開機。")
+
+    try:
+        import smbus
+    except ImportError:
+        return None, ("缺少 smbus 模組，請執行 "
+                      "sudo apt install python3-smbus i2c-tools")
+
+    tried = []
+    for n in buses:
+        try:
+            bus = smbus.SMBus(n)
+        except Exception as e:
+            tried.append(f"bus {n}: 無法開啟（{type(e).__name__}）")
+            continue
+
+        try:
+            # PCA9685 的 MODE1 暫存器讀得到值 = 裝置有回應
+            bus.read_byte_data(address, 0x00)
+            bus.close()
+            return n, f"在 bus {n} 找到 0x{address:02X}"
+        except Exception:
+            tried.append(f"bus {n}: 0x{address:02X} 無回應")
+        finally:
+            try:
+                bus.close()
+            except Exception:
+                pass
+
+    return None, ("所有 bus 都找不到 0x%02X。\n  %s\n"
+                  "  可能是馬達板沒通電，或 SDA/SCL 接線鬆脫。"
+                  % (address, "\n  ".join(tried)))
+
+
+@contextmanager
+def redirected_smbus(bus_number: int, original_bus: int = 1):
+    """
+    在這段程式碼執行的期間，把 smbus.SMBus(1) 導到 bus_number。
+
+    LOBOROBOT2.py 用的是 `import smbus` + `smbus.SMBus(1)`，
+    是在呼叫时才取屬性，所以暫時換掉模組上的 SMBus 就有效，
+    不需要改動課程檔案本身。
+    """
+    import smbus
+
+    real_cls = smbus.SMBus
+
+    def _factory(num=None, *args, **kwargs):
+        # 只有課程檔案寫死的那個編號會被替換
+        if num == original_bus:
+            return real_cls(bus_number, *args, **kwargs)
+        return real_cls(num, *args, **kwargs)
+
+    smbus.SMBus = _factory
+    try:
+        yield
+    finally:
+        smbus.SMBus = real_cls
+
+
 @dataclass
 class MotorState:
     """馬達目前狀態，供 Web UI 輪詢。"""
@@ -75,6 +197,8 @@ class MotorState:
     last_command: str = ""
     last_command_time: float = field(default_factory=time.time)
     hardware_ok: bool = False  # 真實模式是否成功連上硬體
+    i2c_bus: int | None = None  # 實際使用的 I2C bus 編號
+    init_error: str = ""        # 初始化失敗的原因
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +214,8 @@ class MotorState:
             "last_command": self.last_command,
             "last_command_time": self.last_command_time,
             "hardware_ok": self.hardware_ok,
+            "i2c_bus": self.i2c_bus,
+            "init_error": self.init_error,
         }
 
 
@@ -155,6 +281,13 @@ class MotorControl:
         注意：LOBOROBOT2.py 需要 smbus 與 gpiozero，且會直接對 I2C 下手。
         如果初始化失敗，記住錯誤訊息但不要讓整個程式崩潰 ——
         辨識功能應該要能獨立運作。
+
+        I2C bus 的處理
+        --------------
+        LOBOROBOT2.py 裡寫死了 smbus.SMBus(1)，但樹莓派上不一定是
+        bus 1（實測這台車是 bus 13）。這裡先掃描找出真正接著
+        PCA9685 的 bus，再在建構當下把 SMBus(1) 導過去，
+        完全不用改動課程提供的檔案。
         """
         try:
             from LOBOROBOT2 import LOBOROBOT
@@ -163,22 +296,44 @@ class MotorControl:
                 f"找不到 LOBOROBOT2.py（{e}）。"
                 "請確認檔案與 motor_control.py 在同一個目錄。"
             )
+            self.state.init_error = self._init_error
             print(f"[motor] {self._init_error}")
             return
 
+        # ── 1. 找出正確的 I2C bus ──
+        bus, why = find_i2c_bus()
+        if bus is None:
+            self._init_error = (
+                f"找不到 PCA9685（0x{PCA9685_ADDRESS:02X}）：{why}"
+            )
+            self.state.init_error = self._init_error
+            self.state.hardware_ok = False
+            print(f"[motor] {self._init_error}")
+            return
+
+        self.state.i2c_bus = bus
+        print(f"[motor] {why}（課程檔案寫死 bus 1，已導向 bus {bus}）")
+
+        # ── 2. 在 bus 導向的情況下建構 LOBOROBOT ──
         try:
-            self._robot = LOBOROBOT()
+            with redirected_smbus(bus):
+                self._robot = LOBOROBOT()
             self.state.hardware_ok = True
-            print("[motor] LOBOROBOT 硬體初始化成功（PCA9685 @ 0x40, 50Hz）")
+            self.state.init_error = ""
+            print(f"[motor] LOBOROBOT 硬體初始化成功"
+                  f"（PCA9685 @ 0x{PCA9685_ADDRESS:02X} on bus {bus}, 50Hz）")
         except Exception as e:
+            self.state.hardware_ok = False
             self._init_error = (
                 f"LOBOROBOT 初始化失敗：{type(e).__name__}: {e}\n"
+                f"I2C bus = {bus}\n"
                 "請檢查：\n"
-                "  1. I2C 是否啟用：sudo raspi-config → Interface Options → I2C → Yes\n"
-                "  2. PCA9685 接線（SDA/SCL/VCC/GND）\n"
-                "  3. sudo i2cdetect -y 1 是否看得到 0x40\n"
-                "  4. GPIO 24/25 是否已被其他程式佔用"
+                f"  1. bus {bus} 上看得到 0x{PCA9685_ADDRESS:02X} 嗎"
+                f"（sudo i2cdetect -y {bus}）\n"
+                "  2. gpiozero 是否可用：sudo apt install python3-gpiozero\n"
+                "  3. GPIO 24/25 是否已被其他程式佔用"
             )
+            self.state.init_error = self._init_error
             print(f"[motor] {self._init_error}")
 
     @property
