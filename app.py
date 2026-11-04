@@ -42,8 +42,6 @@ from flask import (Flask, Response, jsonify, render_template,
 # face_core 必須先於 cv2 匯入（設定 OPENCV_LOG_LEVEL 與主控台編碼）
 import face_core as fc
 from camera_source import open_camera
-from motor_control import (ACTIONS, MODE_RPI, MODE_SIMULATION,
-                           MotorControl)
 from yolo_detector import YoloDetector, is_available as yolo_available
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -109,7 +107,6 @@ class SystemState:
 
 
 state = SystemState()
-motor = MotorControl(mode=MODE_SIMULATION)
 
 # 設定參數
 CAMERA_INDEX = 0
@@ -483,9 +480,7 @@ def video_snapshot():
 @app.route("/")
 def index():
     """主頁面。"""
-    return render_template("index.html",
-                           actions=ACTIONS,
-                           mode=motor.mode)
+    return render_template("index.html")
 
 
 # ============================================================
@@ -521,8 +516,6 @@ def api_status():
                 if state.register_task else None
             ),
         }
-    payload["motor"] = motor.state.to_dict()
-
     # YOLO 物件偵測狀態（前端單獨顯示）
     payload["ai"] = {
         "enabled": state.ai_enabled,
@@ -549,73 +542,6 @@ def api_ai_status():
         data["detections"] = list(state.ai_results)
         data["count"] = len(state.ai_results)
     return jsonify(data)
-
-
-# ============================================================
-# API：馬達控制
-# ============================================================
-
-@app.route("/api/motor/<action>", methods=["POST"])
-def api_motor(action):
-    """馬達動作指令。"""
-    if action not in ACTIONS:
-        return jsonify({"error": f"不支援的動作：{action}",
-                        "valid": list(ACTIONS)}), 400
-
-    data = request.get_json(silent=True) or {}
-    speed = data.get("speed")
-
-    if speed is not None:
-        try:
-            speed = int(speed)
-        except (TypeError, ValueError):
-            return jsonify({"error": "speed 必須是數字"}), 400
-        if not 0 <= speed <= 100:
-            return jsonify({"error": "speed 必須在 0~100"}), 400
-
-    try:
-        result = motor.move(action, speed)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    return jsonify({"ok": True, "motor": result})
-
-
-@app.route("/api/motor/speed", methods=["POST"])
-def api_motor_speed():
-    """調整速度。"""
-    data = request.get_json(silent=True) or {}
-    speed = data.get("speed")
-    if speed is None:
-        return jsonify({"error": "缺少 speed"}), 400
-    try:
-        speed = int(speed)
-    except (TypeError, ValueError):
-        return jsonify({"error": "speed 必須是數字"}), 400
-    if not 0 <= speed <= 100:
-        return jsonify({"error": "speed 必須在 0~100"}), 400
-    return jsonify({"ok": True, "motor": motor.set_speed(speed)})
-
-
-@app.route("/api/motor/servo", methods=["POST"])
-def api_motor_servo():
-    """控制雲台角度。"""
-    data = request.get_json(silent=True) or {}
-    x = data.get("x")
-    y = data.get("y")
-    return jsonify({"ok": True, "motor": motor.servo_to(x, y)})
-
-
-@app.route("/api/motor/stop", methods=["POST"])
-def api_motor_stop():
-    """停止。"""
-    return jsonify({"ok": True, "motor": motor.stop()})
-
-
-@app.route("/api/motor/emergency", methods=["POST"])
-def api_motor_emergency():
-    """緊急停止。"""
-    return jsonify({"ok": True, "motor": motor.emergency_stop()})
 
 
 # ============================================================
@@ -759,17 +685,21 @@ def load_model_on_startup():
 
 if __name__ == "__main__":
     print("=" * 62)
-    print("  AI 自走車遙控 + 人臉辨識 Web 介面")
-    print(f"  模式：{motor.mode}（{'模擬，指令只記錄不驅動硬體' if motor.mode == MODE_SIMULATION else '真實馬達'}）")
+    print("  人臉辨識 + YOLO 物件偵測 Web 介面")
     print("=" * 62)
 
+    # ── 1. 載入人臉辨識模型 ──
     load_model_on_startup()
+
+    print("=" * 62)
+
+    # ── 2. 啟動背景擷取與 YOLO 執行緒 ──
     start_capture()
 
+    # ── 3. 啟動 Flask 伺服器 ──
     try:
         app.run(host="0.0.0.0", port=5000, threaded=True, debug=False)
     except KeyboardInterrupt:
         print("\n  關閉中…")
     finally:
         stop_capture()
-        motor.shutdown()
