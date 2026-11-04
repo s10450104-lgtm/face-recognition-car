@@ -311,6 +311,9 @@ function bindDpad() {
             $$('[data-action]').forEach(b => b.classList.remove('active'));
         } catch (err) { /* 已處理 */ }
     });
+
+    // 錄影
+    $('#btn-record').addEventListener('click', toggleRecord);
 }
 
 /* ─────────── 滑桿 ─────────── */
@@ -468,6 +471,37 @@ async function refreshPeople() {
         });
     } catch (err) {
         /* 已處理 */
+    }
+}
+
+/* ─────────── 錄影 ─────────── */
+
+let recording = false;
+
+async function toggleRecord() {
+    const btn = $('#btn-record');
+    const fileLabel = $('#record-file');
+    try {
+        if (!recording) {
+            const d = await api('/api/record/start', { method: 'POST' });
+            recording = true;
+            btn.textContent = '■ REC 停止錄影';
+            btn.classList.add('recording');
+            fileLabel.textContent = d.filename;
+            log(`開始錄影：${d.filename}`, 'ok');
+        } else {
+            const d = await api('/api/record/stop', { method: 'POST' });
+            recording = false;
+            btn.textContent = '● REC 開始錄影';
+            btn.classList.remove('recording');
+            fileLabel.innerHTML =
+                `<a href="${d.download}" download>${d.filename}</a>` +
+                `（${d.seconds}s / ${d.frames} 幀）`;
+            log(`錄影完成：${d.filename}（${d.seconds} 秒）`, 'ok');
+            toast(`錄影完成 ${d.seconds} 秒，可點檔名下載`, 'ok');
+        }
+    } catch (err) {
+        /* 錯誤已由 api() 顯示 */
     }
 }
 

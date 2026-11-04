@@ -36,8 +36,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from flask import (Flask, Response, jsonify, render_template,
-                   request, stream_with_context)
+from flask import (Flask, Response, jsonify, render_template, request,
+                   send_from_directory, stream_with_context)
 
 # face_core 必須先於 cv2 匯入（設定 OPENCV_LOG_LEVEL 與主控台編碼）
 import face_core as fc
@@ -418,6 +418,153 @@ def stop_capture():
         state.thread.join(timeout=3)
     if state.ai_thread:
         state.ai_thread.join(timeout=3)
+
+
+# ============================================================
+# 錄影（把帶 YOLO/人臉標註的畫面寫成影片檔）
+# ============================================================
+
+VIDEOS_DIR = BASE_DIR / "videos"
+RECORD_FPS = 15.0
+
+
+class Recorder:
+    """
+    把 state.frame（已標註的的畫面）寫入影片檔。
+
+    為什麼用背景執行緒？
+    ------------------
+    VideoWriter.write() 一次要幾十毫秒，若在 HTTP 請求裡同步寫，
+    錄影期間所有 API 都會變慢。拆成獨立執行緒，請求只負責
+    start/stop，錄影在旁邊慢慢寫。
+
+    幀率控制：只在 state.frame_seq 變化時寫入，避免重複幀
+    把影片時間軸拉長。
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.writer: cv2.VideoWriter | None = None
+        self.active = False
+        self.filename: str | None = None
+        self.frames = 0
+        self.last_seq = -1
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> tuple[bool, str]:
+        """開始錄影。回傳 (成功?, 檔名或錯誤訊息)。"""
+        with self.lock:
+            if self.active:
+                return False, "已在錄影中"
+
+            VIDEOS_DIR.mkdir(exist_ok=True)
+            name = datetime.now().strftime("rec_%Y%m%d_%H%M%S.avi")
+            path = VIDEOS_DIR / name
+
+            # XVID + .avi：樹莓派上 OpenCV 一定支援，不會白錄
+            fourcc = cv2.VideoWriter_fourcc(*"XVID")
+            writer = cv2.VideoWriter(str(path), fourcc, RECORD_FPS,
+                                     (STREAM_WIDTH, STREAM_HEIGHT))
+            if not writer.isOpened():
+                return False, "VideoWriter 開啟失敗（編碼器不支援）"
+
+            self.writer = writer
+            self.active = True
+            self.filename = name
+            self.frames = 0
+            self.last_seq = -1
+
+            self.thread = threading.Thread(target=self._loop, daemon=True,
+                                           name="recorder")
+            self.thread.start()
+
+        print(f"[record] 開始錄影 → {name}", flush=True)
+        return True, name
+
+    def _loop(self):
+        """錄影執行緒：有新幀就寫入，直到 stop() 被呼叫。"""
+        while True:
+            with self.lock:
+                if not self.active:
+                    break
+                writer = self.writer
+
+            with state.lock:
+                frame = state.frame
+                seq = state.frame_seq
+
+            if frame is not None and seq != self.last_seq:
+                writer.write(frame)
+                self.last_seq = seq
+                with self.lock:
+                    self.frames += 1
+
+            time.sleep(0.02)   # 50Hz 輪詢，實際寫入頻率跟著串流 FPS 走
+
+    def stop(self) -> tuple[str | None, int]:
+        """停止錄影。回傳 (檔名, 總幀數)。"""
+        with self.lock:
+            if not self.active:
+                return None, 0
+            self.active = False
+            filename = self.filename
+            frames = self.frames
+
+        if self.thread:
+            self.thread.join(timeout=3)
+
+        with self.lock:
+            if self.writer is not None:
+                self.writer.release()
+                self.writer = None
+
+        print(f"[record] 停止錄影：{filename}（{frames} 幀）", flush=True)
+        return filename, frames
+
+    def status(self) -> dict:
+        with self.lock:
+            return {
+                "active": self.active,
+                "filename": self.filename,
+                "frames": self.frames,
+                "fps": RECORD_FPS,
+            }
+
+
+recorder = Recorder()
+
+
+@app.route("/api/record/start", methods=["POST"])
+def api_record_start():
+    ok, msg = recorder.start()
+    if not ok:
+        return jsonify({"error": msg}), 409
+    return jsonify({"ok": True, "filename": msg,
+                    "message": "錄影中，再按一次停止"})
+
+
+@app.route("/api/record/stop", methods=["POST"])
+def api_record_stop():
+    filename, frames = recorder.stop()
+    if filename is None:
+        return jsonify({"error": "沒有進行中的錄影"}), 404
+    seconds = round(frames / RECORD_FPS, 1) if RECORD_FPS else 0
+    return jsonify({"ok": True, "filename": filename, "frames": frames,
+                    "seconds": seconds,
+                    "download": f"/record/download/{filename}"})
+
+
+@app.route("/api/record/status")
+def api_record_status():
+    return jsonify(recorder.status())
+
+
+@app.route("/record/download/<name>")
+def record_download(name):
+    """下載錄好的影片。只允許 rec_*.avi，避免路徑攻擊。"""
+    if not (name.startswith("rec_") and name.endswith(".avi")):
+        return jsonify({"error": "invalid filename"}), 400
+    return send_from_directory(VIDEOS_DIR, name, as_attachment=True)
 
 
 # ============================================================

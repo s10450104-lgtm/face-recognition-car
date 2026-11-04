@@ -426,6 +426,32 @@ body::before {
     50%      { box-shadow: 0 0 15px rgba(255,59,59,0.42); }
 }
 
+/* 錄影按鈕：未錄影 = 紅點待機；錄影中 = 閃爍紅 */
+.btn-record {
+    background: rgba(255, 59, 59, 0.08);
+    color: var(--red);
+    border-color: rgba(255, 59, 59, 0.4);
+    text-align: center;
+}
+.btn-record:hover { background: rgba(255,59,59,0.2); box-shadow: 0 0 14px rgba(255,59,59,0.4); }
+.btn-record.recording {
+    animation: pulseRed 1.2s ease-in-out infinite;
+    background: rgba(255, 59, 59, 0.28);
+}
+
+.record-file {
+    align-self: center;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-dim, #8b9bb0);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+}
+.record-file a { color: var(--cyan); text-decoration: none; }
+.record-file a:hover { text-decoration: underline; }
+
 .btn-primary {
     background: rgba(0, 240, 255, 0.13);
     color: var(--cyan); border-color: rgba(0,240,255,0.45);

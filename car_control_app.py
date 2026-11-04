@@ -22,9 +22,10 @@ app.py — Flask Web 主程式（遙控車版）
 """
 from __future__ import annotations
 
+import urllib.request
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from motor_control import (ACTIONS, MODE_RPI, MODE_SIMULATION,
                            MotorControl)
@@ -43,6 +44,107 @@ motor = MotorControl(mode=MODE_SIMULATION)
 
 # 車控服務固定使用 5001，跟人臉辨識的 5000 分開。
 PORT = 5001
+
+# 人臉服務的位址：攝影機只能被一個程序開啟（Picamera2 限制），
+# 相機由 5000 的人臉服務持有，車控頁的影像用代理轉發取得。
+FACE_SERVICE = "http://127.0.0.1:5000"
+
+
+# ============================================================
+# 影像串流（代理自人臉服務）
+# ============================================================
+
+@app.route("/video_feed")
+def video_feed():
+    """
+    把人臉服務（127.0.0.1:5000）的 MJPEG 串流轉發給瀏覽器。
+
+    為什麼不自己開相機？
+    ------------------
+    Picamera2 一台相機只能被一個程序開啟。人臉服務（5000）已經
+    持有相機並在畫面上疊了 YOLO 辨識框，車控頁直接轉發它的輸出，
+    開車時就能同時看到影像和 AI 辨識結果。
+    """
+    try:
+        upstream = urllib.request.urlopen(FACE_SERVICE + "/video_feed",
+                                          timeout=10)
+    except Exception as e:
+        return Response(
+            "camera upstream unavailable: " + str(e),
+            status=503, mimetype="text/plain")
+
+    def generate():
+        try:
+            while True:
+                chunk = upstream.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            upstream.close()
+
+    return Response(generate(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/video_snapshot")
+def video_snapshot():
+    """單張截圖，同樣代理自人臉服務。"""
+    try:
+        with urllib.request.urlopen(FACE_SERVICE + "/video_snapshot",
+                                    timeout=10) as r:
+            data = r.read()
+        return Response(data, mimetype="image/jpeg")
+    except Exception as e:
+        return jsonify({"error": "camera upstream unavailable: " + str(e)}), 503
+
+
+# ============================================================
+# 錄影（API 代理自人臉服務；相機與錄影都在 5000 那邊）
+# ============================================================
+
+def _proxy_record(path: str):
+    """轉發錄影相關請求到人臉服務。"""
+    try:
+        if request.method == "POST":
+            req = urllib.request.Request(FACE_SERVICE + path, data=b"{}",
+                                         headers={"Content-Type":
+                                                  "application/json"})
+        else:
+            req = urllib.request.Request(FACE_SERVICE + path)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return Response(r.read(), mimetype="application/json")
+    except Exception as e:
+        return jsonify({"error": f"人臉服務無回應：{e}"}), 503
+
+
+@app.route("/api/record/start", methods=["POST"])
+def api_record_start():
+    return _proxy_record("/api/record/start")
+
+
+@app.route("/api/record/stop", methods=["POST"])
+def api_record_stop():
+    return _proxy_record("/api/record/stop")
+
+
+@app.route("/api/record/status")
+def api_record_status():
+    return _proxy_record("/api/record/status")
+
+
+@app.route("/record/download/<name>")
+def record_download(name):
+    """影片檔下載（從人臉服務的 videos/ 目錄轉發）。"""
+    try:
+        with urllib.request.urlopen(
+                f"{FACE_SERVICE}/record/download/{name}", timeout=30) as r:
+            data = r.read()
+        return Response(data, mimetype="video/x-msvideo",
+                        headers={"Content-Disposition":
+                                 f"attachment; filename={name}"})
+    except Exception as e:
+        return jsonify({"error": f"下載失敗：{e}"}), 503
 
 
 # ============================================================
