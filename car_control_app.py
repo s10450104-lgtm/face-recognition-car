@@ -105,6 +105,9 @@ def api_motor(action):
         result = motor.move(action, speed)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        # lock 等待逾時：馬達控制忙碌，讓前端知道而不是 hang 住
+        return jsonify({"error": str(e)}), 503
 
     return jsonify({"ok": True, "motor": result})
 

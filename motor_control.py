@@ -127,7 +127,8 @@ class MotorControl:
 
     def __init__(self, mode: str = MODE_SIMULATION,
                  default_speed: int = 50,
-                 soft_start_delay: float = 0.01):
+                 soft_start_delay: float = 0.01,
+                 watchdog_timeout: float = 2.5):
         """
         參數
         ----
@@ -137,6 +138,10 @@ class MotorControl:
             前進/後退的預設速度 0~100
         soft_start_delay : float
             後退緩啟動延遲（秒）。避免 RPi 5 馬達啟動的瞬時電流尖峰
+        watchdog_timeout : float
+            看門狗秒數。連續運轉指令（duration=0）若超過此秒數沒有收到
+            新指令，自動停止馬達。避免瀏覽器斷線/當機時馬達永遠轉下去，
+            把電源軌拉垮造成 RPi 重開機（實測會發生）。
         """
         if mode not in (MODE_SIMULATION, MODE_RPI):
             raise ValueError(f"未知的模式：{mode}")
@@ -144,9 +149,13 @@ class MotorControl:
         self.mode = mode
         self.default_speed = max(0, min(100, default_speed))
         self.soft_start_delay = soft_start_delay
+        self.watchdog_timeout = watchdog_timeout
 
         # 執行緒鎖：保護所有 I2C / GPIO 操作
         self.lock = threading.Lock()
+
+        # 看門狗計時器（threading.Timer），只在連續運轉時啟動
+        self._watchdog: threading.Timer | None = None
 
         # LOBOROBOT 實例（只有 RPI 模式才有）
         self._robot = None
@@ -248,7 +257,16 @@ class MotorControl:
 
         spd = self.default_speed if speed is None else max(0, min(100, speed))
 
-        with self.lock:
+        # Lock 等待逾時：Flask 多執行緒下，若另一個請求卡在 I2C，
+        # 這裡最多等 2 秒就放棄並回報錯誤，而不是無限 hang 住。
+        if not self.lock.acquire(timeout=2.0):
+            raise RuntimeError(
+                "馬達控制忙碌中（等待 lock 逾時 2 秒），請稍後再試")
+
+        try:
+            # 新指令進來，先取消上一個看門狗
+            self._cancel_watchdog()
+
             if self.mode == MODE_SIMULATION:
                 left, right = self._simulated_wheels(action, spd)
                 self.state.left_speed = left
@@ -262,7 +280,44 @@ class MotorControl:
             self.state.last_command = ACTION_LABELS.get(action, action)
             self.state.last_command_time = time.time()
 
+            # 連續運轉指令（duration=0）→ 掛上看門狗：
+            # 超過 watchdog_timeout 秒沒有新指令就自動停止。
+            # 「stop」與「有指定 duration」的指令不需要看門狗。
+            if (action != "stop" and duration <= 0
+                    and self.mode == MODE_RPI
+                    and self._robot is not None):
+                self._start_watchdog()
+        finally:
+            self.lock.release()
+
         return self.state.to_dict()
+
+    # ── 看門狗：防止馬達永遠轉下去 ──────────────────────
+    def _start_watchdog(self) -> None:
+        """（需持有 lock）啟動自動停止計時器。"""
+        if self.watchdog_timeout <= 0:
+            return
+        t = threading.Timer(self.watchdog_timeout, self._watchdog_fire)
+        t.daemon = True
+        self._watchdog = t
+        t.start()
+
+    def _cancel_watchdog(self) -> None:
+        """（需持有 lock）取消尚未觸發的看門狗。"""
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
+
+    def _watchdog_fire(self) -> None:
+        """
+        看門狗觸發：超過 watchdog_timeout 秒沒有新指令 → 自動停止。
+
+        刻意呼叫 emergency_stop()（不搶 lock），避免與進行中的
+        指令互相卡住。
+        """
+        print(f"[motor] 看門狗：{self.watchdog_timeout:.1f} 秒沒有新指令，"
+              f"自動停止", flush=True)
+        self.emergency_stop()
 
     def _drive(self, action: str, speed: int, duration: float) -> None:
         """
@@ -340,7 +395,11 @@ class MotorControl:
             pulse_width_us = angle * 11 + 500
         也就是 0° = 500µs、180° = 2480µs。
         """
-        with self.lock:
+        # Lock 等待逾時（同 move()）
+        if not self.lock.acquire(timeout=2.0):
+            raise RuntimeError("馬達控制忙碌中（等待 lock 逾時 2 秒）")
+
+        try:
             if x is not None:
                 x = max(0, min(180, int(x)))
                 self.state.servo_x = x
@@ -356,6 +415,8 @@ class MotorControl:
                         self._robot.set_servo_angle(10, y, 0)
                 except Exception as e:
                     print(f"[motor] 舵機設定失敗：{type(e).__name__}: {e}")
+        finally:
+            self.lock.release()
 
         return self.state.to_dict()
 

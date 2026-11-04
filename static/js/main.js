@@ -210,6 +210,23 @@ async function pollStatus() {
 
 /* ─────────── 馬達控制 ─────────── */
 
+// 按住期間的 keepalive：每 1 秒重發一次相同動作，
+// 讓後端的看門狗（watchdog_timeout=2.5s）知道「還按著」。
+// 放開時送 stop，馬達立刻停。
+let holdTimer = null;
+let currentAction = null;
+
+function stopHold() {
+    if (holdTimer !== null) {
+        clearInterval(holdTimer);
+        holdTimer = null;
+    }
+    if (currentAction !== null && currentAction !== "stop") {
+        sendAction("stop");
+    }
+    currentAction = null;
+}
+
 async function sendAction(action) {
     try {
         const data = await api(`/api/motor/${action}`, {
@@ -227,38 +244,62 @@ async function sendAction(action) {
     }
 }
 
+function pressAction(action) {
+    // 連按同一顆：先停掉前一個 keepalive，重新計時
+    if (holdTimer !== null) {
+        clearInterval(holdTimer);
+        holdTimer = null;
+    }
+    currentAction = action;
+    sendAction(action);
+    if (action !== "stop") {
+        holdTimer = setInterval(() => sendAction(action), 1000);
+    }
+}
+
 function bindDpad() {
     // 注意：用 [data-action] 而不是 .dbtn。
     // STOP 按鈕的 class 是 .btn 不是 .dbtn，只綁 .dbtn 會漏掉它。
     $$('[data-action]').forEach(btn => {
         const action = btn.dataset.action;
 
-        // 滑鼠：按下即送出
+        // 滑鼠：按下開始、放開停止
         btn.addEventListener('mousedown', (e) => {
             e.preventDefault();
-            sendAction(action);
+            pressAction(action);
         });
+        btn.addEventListener('mouseup', stopHold);
+        btn.addEventListener('mouseleave', stopHold);
 
-        // 觸控
+        // 觸控：按下開始、放開停止
         btn.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            sendAction(action);
+            pressAction(action);
         }, { passive: false });
+        btn.addEventListener('touchend', stopHold);
+        btn.addEventListener('touchcancel', stopHold);
 
         // 鍵盤可及性
         btn.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                sendAction(action);
+                pressAction(action);
             }
         });
+        btn.addEventListener('keyup', stopHold);
 
         // 鍵盤操作時沒有 mousedown，靠 click 補一次
         btn.addEventListener('click', (e) => {
             if (e.detail === 0) {        // detail===0 代表不是真實滑鼠點擊
-                sendAction(action);
+                pressAction(action);
             }
         });
+    });
+
+    // 視窗失焦 / 分頁切走 → 立刻停止（防止按住時訊號中斷）
+    window.addEventListener('blur', stopHold);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) stopHold();
     });
 
     // 緊急停止
@@ -441,13 +482,22 @@ function bindKeyboard() {
         const action = KEY_ACTIONS[e.key] || KEY_ACTIONS[e.key.toLowerCase()];
         if (action) {
             e.preventDefault();
-            sendAction(action);
+            // e.repeat 時瀏覽器會連續觸發 keydown，剛好當 keepalive
+            pressAction(action);
             log(`鍵盤指令：${action}`);
         }
 
         // r = 重新載入模型
         if (e.key.toLowerCase() === 'r') {
             loadModel();
+        }
+    });
+
+    // 放開按鍵 → 停止
+    document.addEventListener('keyup', (e) => {
+        const action = KEY_ACTIONS[e.key] || KEY_ACTIONS[e.key.toLowerCase()];
+        if (action) {
+            stopHold();
         }
     });
 }
