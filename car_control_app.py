@@ -76,7 +76,9 @@ def video_feed():
     def generate():
         try:
             while True:
-                chunk = upstream.read(4096)
+                # 一次讀 64KB：MJPEG 一幀約 20~40KB，4096 會造成
+                # 幾百次/秒的系統呼叫，徒增 CPU 負擔
+                chunk = upstream.read(65536)
                 if not chunk:
                     break
                 yield chunk

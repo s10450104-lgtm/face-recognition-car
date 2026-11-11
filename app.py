@@ -29,15 +29,33 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
+# ── CPU 執行緒數限制（必須在 torch/ultralytics 匯入前設定）──────
+# torch 預設會抓全部核心跑推論（OMP），在 Pi 5 的 4 核上，
+# 320px 的小模型反而被執行緒同步開銷拖垮，實測 CPU 衝到 278%，
+# 把系統壓到 crash。限制 2 核後推論速度幾乎不變，但系統有餘裕。
+#
+# OMP_WAIT_POLICY=PASSIVE：OpenMP 工作執行緒推論完「睡覺」而不是
+# 忙等（spin-wait）。實測不設的話，即使推論只佔 0.4 核，工作執行緒
+# 還是以 100% 空轉卡住核心（三條執行緒燒掉 ~2.5 核）——這是
+# 「連上網頁後系統 crash」的主因。
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("MKL_NUM_THREADS", "2")
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("GOMP_SPINCOUNT", "0")
+
 import cv2
 import numpy as np
 from flask import (Flask, Response, jsonify, render_template, request,
                    send_from_directory, stream_with_context)
+
+# OpenCV 的執行緒池同樣限制 2（resize/cvtColor/JPEG 編碼用）
+cv2.setNumThreads(2)
 
 # face_core 必須先於 cv2 匯入（設定 OPENCV_LOG_LEVEL 與主控台編碼）
 import face_core as fc
@@ -349,17 +367,22 @@ def yolo_loop():
         state.ai_enabled = True
         state.ai_error = None
 
-    n = 0
+    last_seq = -1
     while state.running:
         try:
             with state.lock:
                 frame = state.raw_frame
+                seq = state.frame_seq
 
-            if frame is None:
-                time.sleep(0.1)
+            # 只有「新的畫面」才呼叫 tick()。
+            # 舊版在這裡用無限快迴圈空轉呼叫，skip_frames 數的是
+            # 呼叫次數而不是新幀數，導致每秒推論幾十次，
+            # 一顆核心被燒滿（實測 100%）——這是系統 crash 的主因。
+            if frame is None or seq == last_seq:
+                time.sleep(0.03)
                 continue
+            last_seq = seq
 
-            n += 1
             # tick() 內部會依 skip_frames 判斷要不要真的推論
             detections = yolo.tick(frame)
 
@@ -571,38 +594,74 @@ def record_download(name):
 # 影像串流
 # ============================================================
 
-def mjpeg_frame() -> bytes:
-    """把最新一幀編碼成 JPEG。"""
+# 串流 CPU 減壓（課堂簡報 TROUBLESHOOTING 的教訓：串流+YOLO 把 CPU
+# 推到飽和會讓系統不穩定甚至 crash）：
+#   1. 每個用戶端只編碼「新的一幀」，相機沒有新畫面就睡覺，
+#      不再對重複幀做 30 FPS 的無效 JPEG 編碼。
+#   2. 串流上限 10 FPS（相機實際只有 10~15 FPS，30 是浪費）。
+#   3. JPEG 品質 80 -> 70（畫面傳輸量與編碼時間都下降）。
+#   4. 限制同時串流用戶端數量，超過直接回 503。
+STREAM_FPS = 10
+STREAM_JPEG_QUALITY = 70
+MAX_STREAM_CLIENTS = 3
+
+_stream_clients = 0
+_stream_clients_lock = threading.Lock()
+
+
+def mjpeg_frame(last_seq: int) -> tuple[bytes | None, int]:
+    """
+    取得「比 last_seq 新」的幀並編碼成 JPEG。
+
+    回傳 (JPEG bytes 或 None, 最新的 frame_seq)。
+    None 代表沒有新幀（重複幀），呼叫端應跳過送出。
+    """
     with state.lock:
         frame = state.frame
+        seq = state.frame_seq
 
-    if frame is None:
-        # 還沒準備好，先回一張提示圖
-        blank = np.full((STREAM_HEIGHT, STREAM_WIDTH, 3), 25, np.uint8)
-        cv2.putText(blank, "INITIALIZING CAMERA...", (120, 240),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
-        frame = blank
+    if frame is None or seq == last_seq:
+        return None, seq
 
-    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    ok, buf = cv2.imencode(
+        ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_JPEG_QUALITY])
     if not ok:
-        return b""
-    return buf.tobytes()
+        return None, seq
+    return buf.tobytes(), seq
 
 
 @app.route("/video_feed")
 def video_feed():
     """MJPEG 影像串流。瀏覽器把這個當成 <img src> 即可。"""
+    global _stream_clients
+
+    with _stream_clients_lock:
+        if _stream_clients >= MAX_STREAM_CLIENTS:
+            return Response(
+                "too many stream clients, please close other tabs",
+                status=503, mimetype="text/plain")
+        _stream_clients += 1
+
     def generate():
-        while True:
-            if not state.running:
-                break
-            frame = mjpeg_frame()
-            if frame:
-                yield (b"--frame\r\n"
-                       b"Content-Type: image/jpeg\r\n"
-                       b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n"
-                       + frame + b"\r\n")
-            time.sleep(0.033)      # 約 30 FPS
+        last_seq = -1
+        try:
+            while state.running:
+                frame, seq = mjpeg_frame(last_seq)
+                if frame:
+                    last_seq = seq
+                    yield (b"--frame\r\n"
+                           b"Content-Type: image/jpeg\r\n"
+                           b"Content-Length: "
+                           + str(len(frame)).encode() + b"\r\n\r\n"
+                           + frame + b"\r\n")
+                    # 串流上限 STREAM_FPS，等相機出新幀
+                    time.sleep(1.0 / STREAM_FPS)
+                else:
+                    time.sleep(0.03)   # 沒新幀，短暫等待
+        finally:
+            with _stream_clients_lock:
+                global _stream_clients
+                _stream_clients -= 1
 
     return Response(stream_with_context(generate()), mimetype="multipart/x-mixed-replace; boundary=frame")
 

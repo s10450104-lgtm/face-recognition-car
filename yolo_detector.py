@@ -91,6 +91,13 @@ def is_available() -> bool:
     try:
         import ultralytics  # noqa: F401
         import torch        # noqa: F401
+        # 限制 torch 推論執行緒數（預設=全部核心）。
+        # Pi 5 四核全開跑 320px 小模型，同步開銷反而讓 CPU 破 270%；
+        # 2 執行緒的推論速度差不多，但系統整體有餘裕不會卡死。
+        try:
+            torch.set_num_threads(2)
+        except Exception:
+            pass
         return True
     except ImportError:
         return False
