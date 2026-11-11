@@ -424,9 +424,29 @@ class MotorControl:
         """
         緊急停止。
 
-        刻意不使用 self.lock：緊急狀況下寧可搶佔也要立刻停，
-        不能因為另一個執行緒正在操作 I2C 而卡住。
+        I2C 寫入仍必須持鎖（TS(1) 教訓：兩條執行緒同時寫 I2C 會讓
+        PCA9685 當機/匯流排鎖死）。但 move() 持鎖時間只有幾毫秒
+        （4 次 MotorRun 寫入），所以 0.5 秒的鎖等待實務上等於
+        「立刻停」，同時保證不會跟進行中的指令對匯流排同時寫入。
+
+        拿不到鎖（極罕見，代表某次 I2C 已經卡死）時就跳過匯流排
+        寫入，只更新狀態——此時匯流排多半也已經鎖死，重複寫只會
+        更糟，交由 systemd 服務重啟來復原。
         """
+        got_lock = self.lock.acquire(timeout=0.5)
+        if got_lock:
+            try:
+                if self._robot is not None:
+                    try:
+                        self._robot.t_stop(0)
+                    except Exception as e:
+                        print(f"[motor] 緊急停止失敗：{e}")
+            finally:
+                self.lock.release()
+        else:
+            print("[motor] 緊急停止：無法取得 I2C 鎖（匯流排可能已卡死）",
+                  flush=True)
+
         self.state.action = "stop"
         self.state.speed = 0
         self.state.left_speed = 0
@@ -434,12 +454,6 @@ class MotorControl:
         self.state.command_count += 1
         self.state.last_command = "緊急停止"
         self.state.last_command_time = time.time()
-
-        if self._robot is not None:
-            try:
-                self._robot.t_stop(0)
-            except Exception as e:
-                print(f"[motor] 緊急停止失敗：{e}")
 
         return self.state.to_dict()
 
